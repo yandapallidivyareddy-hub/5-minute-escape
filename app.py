@@ -25,10 +25,10 @@ app = FastAPI(
 # GEMINI
 # ============================================================
 
-API_KEY = os.getenv("GEMINI_API_KEY")
+API_KEY = os.getenv("GOOGLE_API_KEY")
 
 if not API_KEY:
-    raise RuntimeError("GEMINI_API_KEY environment variable is not set.")
+    raise RuntimeError("GOOGLE_API_KEY environment variable is not set.")
 
 client = genai.Client(api_key=API_KEY)
 
