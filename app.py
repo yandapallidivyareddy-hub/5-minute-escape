@@ -1,8 +1,12 @@
 import os
+import random
 import html
+from typing import Dict, List
+
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
+
 from google import genai
 from google.genai import types
 
@@ -13,297 +17,366 @@ from google.genai import types
 
 app = FastAPI(
     title="MindMate AI",
-    description="A small AI-powered stress-buster for students",
-    version="1.0.0"
+    description="A small AI-powered stress buster for students."
 )
 
 
 # ============================================================
-# GEMINI CLIENT
+# GEMINI
 # ============================================================
 
-API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+API_KEY = os.getenv("GEMINI_API_KEY")
 
 if not API_KEY:
-    raise RuntimeError(
-        "GEMINI_API_KEY or GOOGLE_API_KEY is not configured in Render."
-    )
+    raise RuntimeError("GEMINI_API_KEY environment variable is not set.")
 
 client = genai.Client(api_key=API_KEY)
 
+# Use a current Gemini model.
+MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
+
 
 # ============================================================
-# REQUEST MODEL
+# SIMPLE SESSION MEMORY
 # ============================================================
 
-class MindMateRequest(BaseModel):
+sessions: Dict[str, List[str]] = {}
+
+
+def get_session(session_id: str) -> List[str]:
+    if session_id not in sessions:
+        sessions[session_id] = []
+
+    return sessions[session_id]
+
+
+def remember_response(session_id: str, response: str):
+    history = get_session(session_id)
+
+    # Store only short summaries of previous responses.
+    history.append(response[:500])
+
+    # Prevent memory from growing forever.
+    if len(history) > 8:
+        sessions[session_id] = history[-8:]
+
+
+# ============================================================
+# REQUEST MODELS
+# ============================================================
+
+class StartRequest(BaseModel):
+    session_id: str
     mood: str
-    activity: str
+
+
+class ActionRequest(BaseModel):
+    session_id: str
+    mood: str
+    action: str
+
+
+class NextRequest(BaseModel):
+    session_id: str
+    mood: str
+    action: str
+    previous: str
 
 
 # ============================================================
-# GEMINI FUNCTION
+# MOOD DATA
 # ============================================================
 
-def generate_activity(mood: str, activity: str) -> str:
+MOODS = {
+    "Stressed": "😰",
+    "Sad": "😔",
+    "Tired": "😴",
+    "Angry": "😡",
+    "Worried": "😟",
+    "Overwhelmed": "😵",
+    "Okay": "🙂",
+    "Excited": "🤩",
+}
 
-    prompts = {
 
-        "Calm Me": f"""
+ACTIONS = {
+    "Calm Me": {
+        "emoji": "🧘",
+        "description": "Slow down and relax"
+    },
+    "Distract Me": {
+        "emoji": "🎮",
+        "description": "Give me something fun"
+    },
+    "Cheer Me Up": {
+        "emoji": "🌈",
+        "description": "Make me smile"
+    },
+    "Reset My Mind": {
+        "emoji": "🔄",
+        "description": "Help me start fresh"
+    },
+}
+
+
+# ============================================================
+# FALLBACK CONTENT
+# ============================================================
+
+FALLBACKS = {
+
+    "Calm Me": [
+        "🌿 Let's slow everything down for a moment.\n\n"
+        "Take a slow breath in for 4 seconds... 🌬️\n"
+        "Hold it for 2 seconds... ⏸️\n"
+        "Now breathe out slowly for 6 seconds. 😌\n\n"
+        "You don't have to solve everything right now. "
+        "Just take this one minute.",
+
+        "🧘 Mini reset:\n\n"
+        "Relax your shoulders.\n"
+        "Unclench your jaw.\n"
+        "Put your phone down for 20 seconds.\n"
+        "Take one slow breath. 🌱\n\n"
+        "That's enough for now. You are allowed to pause.",
+
+        "🌊 Imagine your thoughts are little waves.\n\n"
+        "You don't have to stop the waves.\n"
+        "Just watch them come and go.\n\n"
+        "For the next 30 seconds, breathe slowly and let your mind be quiet. 💙"
+    ],
+
+    "Distract Me": [
+        "🎮 Quick challenge!\n\n"
+        "Look around you and find:\n"
+        "🔴 Something red\n"
+        "🟢 Something green\n"
+        "🔵 Something blue\n\n"
+        "Found them? Nice! 😄\n"
+        "Your brain just took a tiny vacation.",
+
+        "🕵️ Tiny detective challenge!\n\n"
+        "Find the most unusual object near you.\n"
+        "Give it a funny name.\n"
+        "Now imagine it has a secret job. 😂\n\n"
+        "What is its job?",
+
+        "🎲 10-second game!\n\n"
+        "Think of 3 foods that start with the letter 'P'.\n\n"
+        "Ready?\n"
+        "Go! 🚀\n\n"
+        "Your brain deserves a little playful break."
+    ],
+
+    "Cheer Me Up": [
+        "🌈 Here is your reminder:\n\n"
+        "You have survived every difficult day you've faced so far.\n\n"
+        "That's a pretty impressive record. 💙\n\n"
+        "Today doesn't have to be perfect.\n"
+        "It only needs to be a little better than five minutes ago. 😊",
+
+        "🐧 Important announcement:\n\n"
+        "A tiny imaginary penguin has officially been assigned to cheer you up. 🐧🎉\n\n"
+        "Its first message is:\n\n"
+        "\"You are doing better than you think!\"\n\n"
+        "Penguin has spoken. 😂💙",
+
+        "✨ Today's tiny win:\n\n"
+        "You opened MindMate instead of simply ignoring how you feel.\n\n"
+        "That counts.\n"
+        "Small steps are still steps. 🌱"
+    ],
+
+    "Reset My Mind": [
+        "🔄 Let's do a 30-second mental reset.\n\n"
+        "1️⃣ Forget the last task for a moment.\n"
+        "2️⃣ Take one deep breath.\n"
+        "3️⃣ Choose ONE thing you can do next.\n\n"
+        "Not ten things.\n"
+        "Just one. 🎯\n\n"
+        "Small progress beats overwhelming yourself.",
+
+        "🧠 Brain reset:\n\n"
+        "Write down the one thing bothering you most.\n"
+        "Now ask:\n\n"
+        "\"Can I do something about this right now?\"\n\n"
+        "If yes → take one tiny step.\n"
+        "If no → give yourself permission to pause. 🌱",
+
+        "☀️ Fresh start unlocked!\n\n"
+        "You don't need to restart your whole day.\n"
+        "You only need to restart this moment.\n\n"
+        "Take a breath.\n"
+        "Stretch.\n"
+        "Drink some water.\n\n"
+        "Now begin again. 💙"
+    ],
+}
+
+
+# ============================================================
+# AI GENERATION
+# ============================================================
+
+def generate_ai_response(
+    session_id: str,
+    mood: str,
+    action: str
+) -> str:
+
+    history = get_session(session_id)
+
+    previous_text = "\n---\n".join(history[-4:])
+
+    prompt = f"""
 You are MindMate AI, a friendly student stress-buster.
 
-The student currently feels: {mood}
+The student's current mood is:
+{mood}
 
-Create a short calming activity that takes about 2 minutes.
+The student selected:
+{action}
 
-Rules:
+Create ONE short interactive response.
+
+IMPORTANT:
+- Do NOT repeat previous responses.
+- Do NOT give a long lecture.
 - Use very simple English.
-- Be warm and encouraging.
-- Give exactly 3 to 5 small steps.
-- Include breathing, grounding, relaxation, or a peaceful visualization.
-- Do NOT give medical advice.
-- Do NOT mention therapy or diagnosis.
-- Use a few appropriate emojis.
-- End with one short encouraging sentence.
-- Make the activity easy to do anywhere.
+- Be warm, friendly and encouraging.
+- Use emojis naturally.
+- Make it feel like a real interactive app.
+- Give the student ONE small activity they can do in 30-90 seconds.
+- The activity should be easy and safe.
+- End with exactly ONE short question or challenge.
+- Do not mention therapy, diagnosis, or mental illness.
+- Do not say "as an AI".
+- Do not repeat the mood or action unnecessarily.
 
-Format:
+Previous responses:
+{previous_text}
 
-🧘 CALM MOMENT
-
-Short encouraging introduction.
-
-1️⃣ ...
-2️⃣ ...
-3️⃣ ...
-4️⃣ ...
-
-💙 Final encouraging sentence.
-""",
-
-        "Distract Me": f"""
-You are MindMate AI, a playful and friendly student stress-buster.
-
-The student currently feels: {mood}
-
-Create a fun activity that takes about 2 to 5 minutes.
-
-Choose something such as:
-- a tiny quiz
-- a fun guessing game
-- a silly challenge
-- a riddle
-- a word game
-- a quick imagination game
-- a mini creativity challenge
-
-Rules:
-- Use simple English.
-- Make it genuinely fun.
-- Give the student something to DO, not just something to read.
-- Use emojis.
-- Avoid anything requiring special equipment.
-- Keep it suitable for students.
-
-Format:
-
-🎮 QUICK FUN BREAK
-
-Short playful introduction.
-
-🎯 CHALLENGE
-...
-
-💡 YOUR TURN
-...
-
-✨ BONUS
-...
-
-End with a cheerful sentence.
-""",
-
-        "Cheer Me Up": f"""
-You are MindMate AI, a kind and cheerful friend.
-
-The student currently feels: {mood}
-
-Create a short mood-lifting experience that takes about 2 to 5 minutes.
-
-Include:
-- one positive thought
-- one tiny fun activity
-- one playful question or challenge
-- one encouraging message
-
-Rules:
-- Use very simple English.
-- Do not sound like a lecture.
-- Do not give medical advice.
-- Do not mention diagnosis or therapy.
-- Use friendly emojis.
-- Make it feel personal and uplifting.
-
-Format:
-
-🌈 LITTLE MOOD BOOST
-
-A warm opening.
-
-💭 THINK ABOUT THIS
-...
-
-🎯 TRY THIS
-...
-
-😄 FUN QUESTION
-...
-
-💙 REMEMBER
-...
-
-End with a hopeful sentence.
+Now create a fresh response.
 """
-    }
-
-    prompt = prompts.get(
-        activity,
-        f"""
-You are MindMate AI.
-
-The student feels {mood}.
-
-Give them a simple 2-minute stress-busting activity.
-Use simple English, friendly emojis and 3-5 steps.
-End with encouragement.
-"""
-    )
 
     try:
+
         response = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model=MODEL_NAME,
             contents=prompt,
             config=types.GenerateContentConfig(
-                temperature=0.8,
-                max_output_tokens=700
+                temperature=0.9,
+                max_output_tokens=350,
+                candidate_count=1,
+                automatic_function_calling={
+                    "disable": True
+                }
             )
         )
 
-        if response.text:
-            return response.text.strip()
+        text = response.text.strip()
 
-        return "💙 Take a slow breath. You are doing better than you think."
+        if text:
+            remember_response(session_id, text)
+            return text
 
     except Exception as e:
-        print(f"Gemini error: {type(e).__name__}: {e}")
+        print("Gemini error:", str(e))
 
-        return fallback_activity(mood, activity)
+    # Fallback if Gemini fails
+    options = FALLBACKS.get(action, FALLBACKS["Calm Me"])
 
+    history = get_session(session_id)
 
-# ============================================================
-# FALLBACK
-# ============================================================
+    available = [
+        item for item in options
+        if item[:80] not in [x[:80] for x in history]
+    ]
 
-def fallback_activity(mood: str, activity: str) -> str:
+    if not available:
+        available = options
 
-    if activity == "Calm Me":
+    result = random.choice(available)
 
-        return f"""
-🧘 **CALM MOMENT**
+    remember_response(session_id, result)
 
-You are feeling **{mood}**, and that's okay. Let's take a tiny break. 💙
-
-1️⃣ Sit comfortably and relax your shoulders.
-
-2️⃣ Breathe in slowly for 4 seconds. 🌬️
-
-3️⃣ Hold for 2 seconds.
-
-4️⃣ Breathe out slowly for 6 seconds. 😌
-
-5️⃣ Look around and notice 3 things you can see.
-
-💙 You don't have to solve everything right now. Just take this moment for yourself.
-"""
-
-    if activity == "Distract Me":
-
-        return """
-🎮 **QUICK FUN BREAK**
-
-Let's give your brain a tiny adventure! 😄
-
-🎯 **Guess the word!**
-
-I am thinking of something that:
-
-🔹 Is yellow  
-🔹 Is curved  
-🔹 Monkeys love it 🍌
-
-What am I?
-
-...
-
-🍌 **Answer: A BANANA!**
-
-😄 Now make up your own silly riddle.
-
-✨ A little fun can give your brain a fresh start!
-"""
-
-    return f"""
-🌈 **LITTLE MOOD BOOST**
-
-You're feeling **{mood}** right now. That's completely okay. 💙
-
-💭 **THINK ABOUT THIS**
-
-You don't have to have everything figured out today.
-
-🎯 **TRY THIS**
-
-Smile for 5 seconds, stretch your arms, and take one deep breath. 😊
-
-😄 **FUN QUESTION**
-
-If you could instantly teleport anywhere for 10 minutes, where would you go?
-
-💙 **REMEMBER**
-
-A difficult moment is only one moment. Better moments can come next. 🌱
-"""
+    return result
 
 
 # ============================================================
-# API
+# START
 # ============================================================
 
 @app.post("/api/start")
-def start_mindmate(request: MindMateRequest):
+def start_session(request: StartRequest):
 
-    mood = request.mood.strip()
-    activity = request.activity.strip()
+    # New session = fresh experience
+    sessions[request.session_id] = []
 
-    if not mood:
-        return {
-            "success": False,
-            "message": "Please choose how you are feeling."
-        }
+    mood_emoji = MOODS.get(request.mood, "🙂")
 
-    if not activity:
-        return {
-            "success": False,
-            "message": "Please choose an activity."
-        }
-
-    result = generate_activity(mood, activity)
+    message = (
+        f"{mood_emoji} Thanks for checking in.\n\n"
+        f"You chose **{request.mood}**.\n\n"
+        "You don't need to fix everything right now. "
+        "Let's take a tiny break together. 💙"
+    )
 
     return {
         "success": True,
-        "mood": mood,
-        "activity": activity,
-        "response": result
+        "message": message,
+        "actions": [
+            {
+                "name": name,
+                "emoji": info["emoji"],
+                "description": info["description"]
+            }
+            for name, info in ACTIONS.items()
+        ]
+    }
+
+
+# ============================================================
+# ACTION
+# ============================================================
+
+@app.post("/api/action")
+def action(request: ActionRequest):
+
+    response = generate_ai_response(
+        request.session_id,
+        request.mood,
+        request.action
+    )
+
+    return {
+        "success": True,
+        "action": request.action,
+        "response": response,
+        "next_options": [
+            "🎲 Give me another",
+            "🌿 Try a different activity",
+            "💙 I'm feeling better"
+        ]
+    }
+
+
+# ============================================================
+# ANOTHER RESPONSE
+# ============================================================
+
+@app.post("/api/next")
+def next_response(request: NextRequest):
+
+    response = generate_ai_response(
+        request.session_id,
+        request.mood,
+        request.action
+    )
+
+    return {
+        "success": True,
+        "response": response
     }
 
 
@@ -323,19 +396,17 @@ def health():
 # FRONTEND
 # ============================================================
 
-@app.get("/", response_class=HTMLResponse)
-def home():
-
-    return """
+HTML = r"""
 <!DOCTYPE html>
-<html lang="en">
+
+<html>
 
 <head>
 
 <meta charset="UTF-8">
 
 <meta name="viewport"
-      content="width=device-width, initial-scale=1.0">
+content="width=device-width, initial-scale=1.0">
 
 <title>MindMate AI</title>
 
@@ -346,445 +417,708 @@ def home():
 }
 
 body {
+
     margin: 0;
-    min-height: 100vh;
-    font-family: Arial, sans-serif;
+
+    font-family:
+        Inter,
+        -apple-system,
+        BlinkMacSystemFont,
+        "Segoe UI",
+        sans-serif;
 
     background:
-        radial-gradient(
-            circle at top left,
-            #dff7ec,
-            transparent 35%
-        ),
         linear-gradient(
             135deg,
-            #eefbf6,
-            #eaf4ff
+            #eef7ff,
+            #f8f5ff
         );
 
-    color: #183b56;
+    min-height: 100vh;
+
+    color: #172554;
 }
 
 .container {
-    width: min(900px, 92%);
+
+    width: 92%;
+    max-width: 900px;
+
     margin: auto;
-    padding: 35px 0 50px;
+
+    padding: 30px 0 60px;
 }
 
-.header {
+.hero {
+
     text-align: center;
-    margin-bottom: 30px;
+
+    padding: 25px 10px 30px;
 }
 
 .logo {
-    font-size: 55px;
+
+    font-size: 48px;
 }
 
 h1 {
-    margin: 5px 0;
+
+    margin: 8px 0;
+
     font-size: 42px;
-    color: #123c55;
+
+    color: #123c73;
 }
 
 .subtitle {
+
     font-size: 18px;
-    color: #557080;
+
+    color: #64748b;
 }
 
 .card {
-    background: rgba(255,255,255,0.88);
+
+    background: rgba(255,255,255,.88);
+
     border-radius: 24px;
+
     padding: 28px;
+
     margin-top: 20px;
 
     box-shadow:
-        0 12px 35px rgba(30,80,100,0.10);
+        0 15px 45px rgba(30,64,175,.10);
+
+    border: 1px solid rgba(255,255,255,.8);
 }
 
 .section-title {
-    font-size: 21px;
-    font-weight: bold;
+
+    font-size: 22px;
+
+    font-weight: 700;
+
     margin-bottom: 18px;
 }
 
-.mood-grid {
+.moods {
+
     display: grid;
+
     grid-template-columns:
-        repeat(auto-fit, minmax(130px, 1fr));
+        repeat(4, 1fr);
 
     gap: 12px;
 }
 
 .mood {
-    border: 2px solid #d8e9ef;
-    background: white;
-    padding: 15px 10px;
-    border-radius: 16px;
+
+    border: none;
+
+    padding: 16px 8px;
+
+    border-radius: 18px;
+
+    background: #f1f5f9;
 
     cursor: pointer;
-    font-size: 16px;
 
-    transition: 0.2s;
+    font-size: 15px;
+
+    transition: .2s;
 }
 
 .mood:hover {
-    transform: translateY(-2px);
-    border-color: #63b99b;
+
+    transform: translateY(-3px);
+
+    background: #dbeafe;
 }
 
 .mood.selected {
-    background: #dff7ec;
-    border-color: #35a875;
-    font-weight: bold;
-}
 
-.activities {
-    display: grid;
-    grid-template-columns:
-        repeat(auto-fit, minmax(180px, 1fr));
+    background: #2563eb;
 
-    gap: 15px;
-}
-
-.activity {
-    border: none;
-    border-radius: 18px;
-    padding: 20px;
-
-    background: #f4f9ff;
-    color: #183b56;
-
-    cursor: pointer;
-
-    transition: 0.2s;
-}
-
-.activity:hover {
-    transform: translateY(-3px);
-}
-
-.activity.selected {
-    background: #dff0ff;
-    outline: 3px solid #65a9d6;
-}
-
-.activity-icon {
-    font-size: 35px;
-}
-
-.activity-name {
-    font-size: 18px;
-    font-weight: bold;
-    margin-top: 8px;
-}
-
-.activity-desc {
-    color: #617582;
-    margin-top: 5px;
-}
-
-button.generate {
-    width: 100%;
-    border: none;
-
-    margin-top: 25px;
-    padding: 17px;
-
-    border-radius: 16px;
-
-    background: #247ba0;
     color: white;
 
-    font-size: 18px;
-    font-weight: bold;
-
-    cursor: pointer;
+    box-shadow:
+        0 8px 20px rgba(37,99,235,.25);
 }
 
-button.generate:hover {
-    background: #1b6381;
+.action-grid {
+
+    display: grid;
+
+    grid-template-columns:
+        repeat(2, 1fr);
+
+    gap: 16px;
 }
 
-button.generate:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-}
+.action {
 
-.result {
-    display: none;
+    border: none;
 
-    margin-top: 25px;
+    border-radius: 22px;
+
+    padding: 24px;
+
+    text-align: left;
 
     background: white;
 
-    border-radius: 22px;
-    padding: 30px;
-
-    line-height: 1.7;
+    cursor: pointer;
 
     box-shadow:
-        0 10px 30px rgba(30,80,100,0.08);
+        0 8px 25px rgba(0,0,0,.07);
+
+    transition: .25s;
+
+    border: 2px solid transparent;
+}
+
+.action:hover {
+
+    transform: translateY(-5px);
+
+    border-color: #93c5fd;
+
+}
+
+.action-icon {
+
+    font-size: 36px;
+}
+
+.action-title {
+
+    font-size: 19px;
+
+    font-weight: 700;
+
+    margin-top: 8px;
+}
+
+.action-desc {
+
+    color: #64748b;
+
+    margin-top: 5px;
+}
+
+.primary {
+
+    width: 100%;
+
+    border: none;
+
+    border-radius: 18px;
+
+    padding: 16px;
+
+    margin-top: 22px;
+
+    background:
+        linear-gradient(
+            135deg,
+            #2563eb,
+            #4f46e5
+        );
+
+    color: white;
+
+    font-size: 17px;
+
+    font-weight: 700;
+
+    cursor: pointer;
+
+    box-shadow:
+        0 10px 25px rgba(37,99,235,.25);
+}
+
+.primary:hover {
+
+    transform: translateY(-2px);
+}
+
+.result {
+
+    margin-top: 24px;
+
+    background:
+        linear-gradient(
+            135deg,
+            #eff6ff,
+            #f5f3ff
+        );
+
+    border-radius: 22px;
+
+    padding: 25px;
+
+    line-height: 1.75;
+
+    font-size: 17px;
 
     white-space: pre-wrap;
+
+    border: 1px solid #dbeafe;
+
+}
+
+.result-title {
+
+    font-size: 21px;
+
+    font-weight: 700;
+
+    margin-bottom: 14px;
+
+    color: #1e3a8a;
+}
+
+.next-buttons {
+
+    display: flex;
+
+    flex-wrap: wrap;
+
+    gap: 10px;
+
+    margin-top: 18px;
+}
+
+.next-btn {
+
+    border: none;
+
+    border-radius: 14px;
+
+    padding: 12px 17px;
+
+    background: white;
+
+    color: #1e40af;
+
+    border: 1px solid #bfdbfe;
+
+    cursor: pointer;
+
+    font-weight: 600;
+}
+
+.next-btn:hover {
+
+    background: #eff6ff;
 }
 
 .loading {
-    display: none;
+
     text-align: center;
+
     padding: 20px;
-    font-size: 18px;
+
+    color: #64748b;
+}
+
+.hidden {
+
+    display: none;
 }
 
 .footer {
+
     text-align: center;
+
     margin-top: 30px;
-    color: #708895;
+
+    color: #64748b;
+
+    font-size: 14px;
+}
+
+@media(max-width:650px) {
+
+    h1 {
+        font-size: 32px;
+    }
+
+    .moods {
+
+        grid-template-columns:
+            repeat(2, 1fr);
+    }
+
+    .action-grid {
+
+        grid-template-columns: 1fr;
+    }
+
+    .card {
+
+        padding: 20px;
+    }
 }
 
 </style>
 
 </head>
 
+
 <body>
+
 
 <div class="container">
 
-    <div class="header">
 
-        <div class="logo">🌱</div>
+<div class="hero">
 
-        <h1>MindMate AI</h1>
+<div class="logo">🌱</div>
 
-        <div class="subtitle">
-            Your little AI-powered stress-buster 💙
-        </div>
+<h1>MindMate AI</h1>
 
-        <p>
-            Take a 2-minute break. You deserve it.
-        </p>
+<div class="subtitle">
 
-    </div>
+Your little AI-powered stress-buster 💙
 
+<br>
 
-    <div class="card">
+Take a tiny break. You deserve it.
 
-        <div class="section-title">
-            😊 How are you feeling right now?
-        </div>
+</div>
 
-        <div class="mood-grid">
-
-            <button class="mood"
-                    onclick="selectMood(this, 'Stressed')">
-                😰 Stressed
-            </button>
-
-            <button class="mood"
-                    onclick="selectMood(this, 'Sad')">
-                😔 Sad
-            </button>
-
-            <button class="mood"
-                    onclick="selectMood(this, 'Tired')">
-                😴 Tired
-            </button>
-
-            <button class="mood"
-                    onclick="selectMood(this, 'Angry')">
-                😡 Angry
-            </button>
-
-            <button class="mood"
-                    onclick="selectMood(this, 'Worried')">
-                😟 Worried
-            </button>
-
-            <button class="mood"
-                    onclick="selectMood(this, 'Overwhelmed')">
-                😵 Overwhelmed
-            </button>
-
-            <button class="mood"
-                    onclick="selectMood(this, 'Okay')">
-                🙂 Okay
-            </button>
-
-            <button class="mood"
-                    onclick="selectMood(this, 'Excited')">
-                🤩 Excited
-            </button>
-
-        </div>
-
-    </div>
+</div>
 
 
-    <div class="card">
+<div class="card">
 
-        <div class="section-title">
-            🤖 What would you like to do?
-        </div>
+<div class="section-title">
 
-        <div class="activities">
+😊 How are you feeling right now?
 
-            <button class="activity"
-                    onclick="selectActivity(this, 'Calm Me')">
-
-                <div class="activity-icon">
-                    🧘
-                </div>
-
-                <div class="activity-name">
-                    Calm Me
-                </div>
-
-                <div class="activity-desc">
-                    Relax your mind
-                </div>
-
-            </button>
+</div>
 
 
-            <button class="activity"
-                    onclick="selectActivity(this, 'Distract Me')">
+<div class="moods">
 
-                <div class="activity-icon">
-                    🎮
-                </div>
+<button class="mood" data-mood="Stressed">
+😰<br>Stressed
+</button>
 
-                <div class="activity-name">
-                    Distract Me
-                </div>
+<button class="mood" data-mood="Sad">
+😔<br>Sad
+</button>
 
-                <div class="activity-desc">
-                    Give me something fun
-                </div>
+<button class="mood" data-mood="Tired">
+😴<br>Tired
+</button>
 
-            </button>
+<button class="mood" data-mood="Angry">
+😡<br>Angry
+</button>
 
+<button class="mood" data-mood="Worried">
+😟<br>Worried
+</button>
 
-            <button class="activity"
-                    onclick="selectActivity(this, 'Cheer Me Up')">
+<button class="mood" data-mood="Overwhelmed">
+😵<br>Overwhelmed
+</button>
 
-                <div class="activity-icon">
-                    📖
-                </div>
+<button class="mood" data-mood="Okay">
+🙂<br>Okay
+</button>
 
-                <div class="activity-name">
-                    Cheer Me Up
-                </div>
+<button class="mood" data-mood="Excited">
+🤩<br>Excited
+</button>
 
-                <div class="activity-desc">
-                    Make me smile
-                </div>
-
-            </button>
-
-        </div>
-
-
-        <button class="generate"
-                id="generateButton"
-                onclick="generateActivity()"
-                disabled>
-
-            💙 Help Me Feel Better
-
-        </button>
-
-        <div class="loading" id="loading">
-            🌱 MindMate is preparing your little break...
-        </div>
-
-    </div>
+</div>
 
 
-    <div class="result"
-         id="result">
-    </div>
+<button
+class="primary"
+id="startBtn"
+disabled>
+
+💙 Help Me Feel Better
+
+</button>
+
+</div>
 
 
-    <div class="footer">
-        🌱 MindMate AI • A small break can make a big difference 💙
-    </div>
+<div
+class="card hidden"
+id="actionsCard">
+
+<div class="section-title">
+
+🤖 What would you like to do?
+
+</div>
+
+
+<div
+class="action-grid"
+id="actionGrid">
+
+</div>
+
+</div>
+
+
+<div
+class="card hidden"
+id="resultCard">
+
+<div class="result-title">
+
+✨ Your MindMate Moment
+
+</div>
+
+<div
+class="result"
+id="result">
+
+</div>
+
+
+<div
+class="next-buttons"
+id="nextButtons">
+
+<button
+class="next-btn"
+id="anotherBtn">
+
+🎲 Give me another
+
+</button>
+
+<button
+class="next-btn"
+id="differentBtn">
+
+🌿 Try a different activity
+
+</button>
+
+<button
+class="next-btn"
+id="betterBtn">
+
+💙 I'm feeling better
+
+</button>
+
+</div>
+
+</div>
+
+
+<div class="footer">
+
+🌱 MindMate AI • A small break can make a big difference
+
+</div>
+
 
 </div>
 
 
 <script>
 
+let sessionId =
+    "session_" +
+    Date.now() +
+    "_" +
+    Math.random()
+        .toString(36)
+        .substring(2, 8);
+
 let selectedMood = "";
-let selectedActivity = "";
+
+let selectedAction = "";
+
+const moods =
+    document.querySelectorAll(".mood");
+
+const startBtn =
+    document.getElementById("startBtn");
+
+const actionsCard =
+    document.getElementById("actionsCard");
+
+const actionGrid =
+    document.getElementById("actionGrid");
+
+const resultCard =
+    document.getElementById("resultCard");
+
+const result =
+    document.getElementById("result");
 
 
-function selectMood(button, mood) {
+// ========================================================
+// MOOD SELECTION
+// ========================================================
 
-    document
-        .querySelectorAll(".mood")
-        .forEach(item => {
-            item.classList.remove("selected");
-        });
+moods.forEach(button => {
 
-    button.classList.add("selected");
+    button.addEventListener(
+        "click",
+        () => {
 
-    selectedMood = mood;
+            moods.forEach(
+                b => b.classList.remove("selected")
+            );
 
-    updateButton();
+            button.classList.add("selected");
 
-}
+            selectedMood =
+                button.dataset.mood;
 
+            startBtn.disabled = false;
 
-function selectActivity(button, activity) {
+        }
+    );
 
-    document
-        .querySelectorAll(".activity")
-        .forEach(item => {
-            item.classList.remove("selected");
-        });
-
-    button.classList.add("selected");
-
-    selectedActivity = activity;
-
-    updateButton();
-
-}
+});
 
 
-function updateButton() {
+// ========================================================
+// START
+// ========================================================
 
-    const button =
-        document.getElementById("generateButton");
+startBtn.addEventListener(
+    "click",
+    async () => {
 
-    button.disabled =
-        !(selectedMood && selectedActivity);
+        startBtn.disabled = true;
 
-}
+        startBtn.innerText =
+            "💙 Let's take a moment...";
+
+        try {
+
+            const response =
+                await fetch("/api/start", {
+
+                    method: "POST",
+
+                    headers: {
+                        "Content-Type":
+                            "application/json"
+                    },
+
+                    body: JSON.stringify({
+
+                        session_id:
+                            sessionId,
+
+                        mood:
+                            selectedMood
+
+                    })
+
+                });
+
+            const data =
+                await response.json();
+
+            actionGrid.innerHTML = "";
+
+            data.actions.forEach(
+                action => {
+
+                    const button =
+                        document.createElement("button");
+
+                    button.className =
+                        "action";
+
+                    button.innerHTML = `
+
+                        <div class="action-icon">
+                            ${action.emoji}
+                        </div>
+
+                        <div class="action-title">
+                            ${action.name}
+                        </div>
+
+                        <div class="action-desc">
+                            ${action.description}
+                        </div>
+                    `;
+
+                    button.onclick =
+                        () => chooseAction(
+                            action.name
+                        );
+
+                    actionGrid.appendChild(button);
+
+                }
+            );
+
+            actionsCard.classList.remove(
+                "hidden"
+            );
+
+            actionsCard.scrollIntoView({
+                behavior: "smooth"
+            });
+
+        } catch (error) {
+
+            alert(
+                "Something went wrong. Please try again."
+            );
+
+        } finally {
+
+            startBtn.disabled = false;
+
+            startBtn.innerText =
+                "💙 Help Me Feel Better";
+
+        }
+
+    }
+);
 
 
-async function generateActivity() {
+// ========================================================
+// ACTION
+// ========================================================
 
-    const result =
-        document.getElementById("result");
+async function chooseAction(action) {
 
-    const loading =
-        document.getElementById("loading");
+    selectedAction = action;
 
-    const button =
-        document.getElementById("generateButton");
+    resultCard.classList.remove(
+        "hidden"
+    );
 
+    result.innerHTML = `
+        <div class="loading">
+            🌱 MindMate is preparing a tiny break for you...
+        </div>
+    `;
 
-    result.style.display = "none";
-
-    loading.style.display = "block";
-
-    button.disabled = true;
-
+    resultCard.scrollIntoView({
+        behavior: "smooth"
+    });
 
     try {
 
         const response =
-            await fetch("/api/start", {
+            await fetch("/api/action", {
 
                 method: "POST",
 
@@ -795,64 +1129,208 @@ async function generateActivity() {
 
                 body: JSON.stringify({
 
-                    mood: selectedMood,
+                    session_id:
+                        sessionId,
 
-                    activity: selectedActivity
+                    mood:
+                        selectedMood,
+
+                    action:
+                        selectedAction
 
                 })
 
             });
 
-
         const data =
             await response.json();
 
-
-        if (!data.success) {
-
-            throw new Error(
-                data.message ||
-                "Something went wrong."
-            );
-
-        }
-
-
-        result.textContent =
-            data.response;
-
-        result.style.display =
-            "block";
-
-
-        result.scrollIntoView({
-            behavior: "smooth",
-            block: "start"
-        });
-
+        showResult(data.response);
 
     } catch (error) {
 
-        result.textContent =
-            "💙 Something went wrong. Please try again.";
-
-        result.style.display =
-            "block";
-
-        console.error(error);
-
-    } finally {
-
-        loading.style.display =
-            "none";
-
-        updateButton();
+        result.innerText =
+            "💙 I couldn't prepare your activity right now. Try again.";
 
     }
 
 }
 
+
+// ========================================================
+// SHOW RESULT
+// ========================================================
+
+function showResult(text) {
+
+    // Convert basic markdown safely
+    let safe =
+        escapeHtml(text);
+
+    safe =
+        safe.replace(
+            /\*\*(.*?)\*\*/g,
+            "<strong>$1</strong>"
+        );
+
+    safe =
+        safe.replace(
+            /\n/g,
+            "<br>"
+        );
+
+    result.innerHTML =
+        safe;
+
+}
+
+
+// ========================================================
+// ANOTHER
+// ========================================================
+
+document
+    .getElementById("anotherBtn")
+    .addEventListener(
+        "click",
+        async () => {
+
+            result.innerHTML = `
+                <div class="loading">
+                    🎲 Finding something fresh...
+                </div>
+            `;
+
+            try {
+
+                const response =
+                    await fetch("/api/next", {
+
+                        method: "POST",
+
+                        headers: {
+                            "Content-Type":
+                                "application/json"
+                        },
+
+                        body: JSON.stringify({
+
+                            session_id:
+                                sessionId,
+
+                            mood:
+                                selectedMood,
+
+                            action:
+                                selectedAction,
+
+                            previous:
+                                result.innerText
+
+                        })
+
+                    });
+
+                const data =
+                    await response.json();
+
+                showResult(
+                    data.response
+                );
+
+            } catch (error) {
+
+                result.innerText =
+                    "💙 Let's try that again.";
+
+            }
+
+        }
+    );
+
+
+// ========================================================
+// DIFFERENT ACTIVITY
+// ========================================================
+
+document
+    .getElementById("differentBtn")
+    .addEventListener(
+        "click",
+        () => {
+
+            actionsCard.scrollIntoView({
+                behavior: "smooth"
+            });
+
+        }
+    );
+
+
+// ========================================================
+// FEELING BETTER
+// ========================================================
+
+document
+    .getElementById("betterBtn")
+    .addEventListener(
+        "click",
+        () => {
+
+            result.innerHTML = `
+
+                <div style="
+                    text-align:center;
+                    font-size:20px;
+                ">
+
+                    🌟 That's wonderful! 💙
+
+                    <br><br>
+
+                    You just gave yourself
+                    a little space to breathe.
+
+                    <br><br>
+
+                    🌱 Remember:
+                    <br>
+                    You don't always need
+                    a big solution.
+
+                    <br>
+                    Sometimes you just need
+                    a small pause.
+
+                    <br><br>
+
+                    😊 Be kind to yourself today.
+
+                </div>
+
+            `;
+
+        }
+    );
+
+
+// ========================================================
+// ESCAPE HTML
+// ========================================================
+
+function escapeHtml(text) {
+
+    const div =
+        document.createElement("div");
+
+    div.textContent =
+        text;
+
+    return div.innerHTML;
+}
+
 </script>
+
 
 </body>
 
@@ -861,17 +1339,29 @@ async function generateActivity() {
 
 
 # ============================================================
-# LOCAL DEVELOPMENT
+# HOME
+# ============================================================
+
+@app.get("/", response_class=HTMLResponse)
+def home():
+
+    return HTMLResponse(content=HTML)
+
+
+# ============================================================
+# RUN LOCALLY
 # ============================================================
 
 if __name__ == "__main__":
 
     import uvicorn
 
-    port = int(os.getenv("PORT", "8000"))
+    port = int(
+        os.getenv("PORT", "8000")
+    )
 
     uvicorn.run(
-        "app:app",
+        app,
         host="0.0.0.0",
         port=port
     )
