@@ -14,11 +14,11 @@ from google.genai import types
 # CONFIGURATION
 # ============================================================
 
-API_KEY = os.getenv("GEMINI_API_KEY")
+API_KEY = os.getenv("GOOGLE_API_KEY")
 
 if not API_KEY:
     raise RuntimeError(
-        "GEMINI_API_KEY is not configured. "
+        "GOOGLE_API_KEY is not configured. "
         "Add it in Render → Environment Variables."
     )
 
