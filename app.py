@@ -1,9 +1,6 @@
 import os
-import json
-import random
-from typing import Optional
-
-from fastapi import FastAPI, HTTPException
+import html
+from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from google import genai
@@ -11,138 +8,326 @@ from google.genai import types
 
 
 # ============================================================
-# CONFIGURATION
-# ============================================================
-
-API_KEY = os.getenv("GOOGLE_API_KEY")
-
-if not API_KEY:
-    raise RuntimeError(
-        "GOOGLE_API_KEY is not configured. "
-        "Add it in Render → Environment Variables."
-    )
-
-client = genai.Client(api_key=API_KEY)
-
-# Current stable Gemini model
-MODEL = "gemini-3.5-flash"
-
-
-# ============================================================
-# FASTAPI
+# APP
 # ============================================================
 
 app = FastAPI(
     title="MindMate AI",
-    description="AI-powered Student Stress-Buster",
+    description="A small AI-powered stress-buster for students",
     version="1.0.0"
 )
 
 
 # ============================================================
-# REQUEST MODELS
+# GEMINI CLIENT
 # ============================================================
 
-class StartRequest(BaseModel):
-    mood: str
+API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
 
-
-class ActivityRequest(BaseModel):
-    mood: str
-    activity: str
-
-
-class CheckinRequest(BaseModel):
-    mood: str
-    activity: str
-    feeling: str
-
-
-# ============================================================
-# BASIC SAFETY CHECK
-# ============================================================
-
-RISK_WORDS = [
-    "suicide",
-    "kill myself",
-    "end my life",
-    "hurt myself",
-    "self harm",
-    "self-harm",
-    "die",
-    "want to die"
-]
-
-
-def contains_risk_language(text: str) -> bool:
-    text = text.lower()
-
-    return any(
-        phrase in text
-        for phrase in RISK_WORDS
+if not API_KEY:
+    raise RuntimeError(
+        "GEMINI_API_KEY or GOOGLE_API_KEY is not configured in Render."
     )
 
+client = genai.Client(api_key=API_KEY)
 
-def safety_response():
+
+# ============================================================
+# REQUEST MODEL
+# ============================================================
+
+class MindMateRequest(BaseModel):
+    mood: str
+    activity: str
+
+
+# ============================================================
+# GEMINI FUNCTION
+# ============================================================
+
+def generate_activity(mood: str, activity: str) -> str:
+
+    prompts = {
+
+        "Calm Me": f"""
+You are MindMate AI, a friendly student stress-buster.
+
+The student currently feels: {mood}
+
+Create a short calming activity that takes about 2 minutes.
+
+Rules:
+- Use very simple English.
+- Be warm and encouraging.
+- Give exactly 3 to 5 small steps.
+- Include breathing, grounding, relaxation, or a peaceful visualization.
+- Do NOT give medical advice.
+- Do NOT mention therapy or diagnosis.
+- Use a few appropriate emojis.
+- End with one short encouraging sentence.
+- Make the activity easy to do anywhere.
+
+Format:
+
+🧘 CALM MOMENT
+
+Short encouraging introduction.
+
+1️⃣ ...
+2️⃣ ...
+3️⃣ ...
+4️⃣ ...
+
+💙 Final encouraging sentence.
+""",
+
+        "Distract Me": f"""
+You are MindMate AI, a playful and friendly student stress-buster.
+
+The student currently feels: {mood}
+
+Create a fun activity that takes about 2 to 5 minutes.
+
+Choose something such as:
+- a tiny quiz
+- a fun guessing game
+- a silly challenge
+- a riddle
+- a word game
+- a quick imagination game
+- a mini creativity challenge
+
+Rules:
+- Use simple English.
+- Make it genuinely fun.
+- Give the student something to DO, not just something to read.
+- Use emojis.
+- Avoid anything requiring special equipment.
+- Keep it suitable for students.
+
+Format:
+
+🎮 QUICK FUN BREAK
+
+Short playful introduction.
+
+🎯 CHALLENGE
+...
+
+💡 YOUR TURN
+...
+
+✨ BONUS
+...
+
+End with a cheerful sentence.
+""",
+
+        "Cheer Me Up": f"""
+You are MindMate AI, a kind and cheerful friend.
+
+The student currently feels: {mood}
+
+Create a short mood-lifting experience that takes about 2 to 5 minutes.
+
+Include:
+- one positive thought
+- one tiny fun activity
+- one playful question or challenge
+- one encouraging message
+
+Rules:
+- Use very simple English.
+- Do not sound like a lecture.
+- Do not give medical advice.
+- Do not mention diagnosis or therapy.
+- Use friendly emojis.
+- Make it feel personal and uplifting.
+
+Format:
+
+🌈 LITTLE MOOD BOOST
+
+A warm opening.
+
+💭 THINK ABOUT THIS
+...
+
+🎯 TRY THIS
+...
+
+😄 FUN QUESTION
+...
+
+💙 REMEMBER
+...
+
+End with a hopeful sentence.
+"""
+    }
+
+    prompt = prompts.get(
+        activity,
+        f"""
+You are MindMate AI.
+
+The student feels {mood}.
+
+Give them a simple 2-minute stress-busting activity.
+Use simple English, friendly emojis and 3-5 steps.
+End with encouragement.
+"""
+    )
+
+    try:
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                temperature=0.8,
+                max_output_tokens=700
+            )
+        )
+
+        if response.text:
+            return response.text.strip()
+
+        return "💙 Take a slow breath. You are doing better than you think."
+
+    except Exception as e:
+        print(f"Gemini error: {type(e).__name__}: {e}")
+
+        return fallback_activity(mood, activity)
+
+
+# ============================================================
+# FALLBACK
+# ============================================================
+
+def fallback_activity(mood: str, activity: str) -> str:
+
+    if activity == "Calm Me":
+
+        return f"""
+🧘 **CALM MOMENT**
+
+You are feeling **{mood}**, and that's okay. Let's take a tiny break. 💙
+
+1️⃣ Sit comfortably and relax your shoulders.
+
+2️⃣ Breathe in slowly for 4 seconds. 🌬️
+
+3️⃣ Hold for 2 seconds.
+
+4️⃣ Breathe out slowly for 6 seconds. 😌
+
+5️⃣ Look around and notice 3 things you can see.
+
+💙 You don't have to solve everything right now. Just take this moment for yourself.
+"""
+
+    if activity == "Distract Me":
+
+        return """
+🎮 **QUICK FUN BREAK**
+
+Let's give your brain a tiny adventure! 😄
+
+🎯 **Guess the word!**
+
+I am thinking of something that:
+
+🔹 Is yellow  
+🔹 Is curved  
+🔹 Monkeys love it 🍌
+
+What am I?
+
+...
+
+🍌 **Answer: A BANANA!**
+
+😄 Now make up your own silly riddle.
+
+✨ A little fun can give your brain a fresh start!
+"""
+
+    return f"""
+🌈 **LITTLE MOOD BOOST**
+
+You're feeling **{mood}** right now. That's completely okay. 💙
+
+💭 **THINK ABOUT THIS**
+
+You don't have to have everything figured out today.
+
+🎯 **TRY THIS**
+
+Smile for 5 seconds, stretch your arms, and take one deep breath. 😊
+
+😄 **FUN QUESTION**
+
+If you could instantly teleport anywhere for 10 minutes, where would you go?
+
+💙 **REMEMBER**
+
+A difficult moment is only one moment. Better moments can come next. 🌱
+"""
+
+
+# ============================================================
+# API
+# ============================================================
+
+@app.post("/api/start")
+def start_mindmate(request: MindMateRequest):
+
+    mood = request.mood.strip()
+    activity = request.activity.strip()
+
+    if not mood:
+        return {
+            "success": False,
+            "message": "Please choose how you are feeling."
+        }
+
+    if not activity:
+        return {
+            "success": False,
+            "message": "Please choose an activity."
+        }
+
+    result = generate_activity(mood, activity)
+
     return {
-        "title": "💙 You don't have to handle this alone",
-        "message": (
-            "I'm really sorry you're going through something this heavy. "
-            "An AI cannot provide the kind of help you may need right now. "
-            "Please reach out to someone you trust, such as a parent, "
-            "friend, teacher, counselor, or another trusted person, "
-            "and stay with someone if you can."
-        ),
-        "activities": [
-            "💙 Talk to someone you trust",
-            "📞 Contact a local emergency or crisis service",
-            "🏫 Reach out to a teacher or college counselor",
-            "🌿 Stay with someone rather than being alone"
-        ]
+        "success": True,
+        "mood": mood,
+        "activity": activity,
+        "response": result
     }
 
 
 # ============================================================
-# GEMINI HELPER
+# HEALTH CHECK
 # ============================================================
 
-def ask_gemini(prompt: str) -> str:
-
-    try:
-
-        response = client.models.generate_content(
-            model=MODEL,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                max_output_tokens=800
-            )
-        )
-
-        if not response.text:
-            raise ValueError("Gemini returned an empty response.")
-
-        return response.text.strip()
-
-    except Exception as e:
-
-        print("Gemini error:", repr(e))
-
-        raise HTTPException(
-            status_code=500,
-            detail="Unable to generate the activity right now. Please try again."
-        )
+@app.get("/health")
+def health():
+    return {
+        "status": "healthy",
+        "app": "MindMate AI"
+    }
 
 
 # ============================================================
-# HOME PAGE
+# FRONTEND
 # ============================================================
 
 @app.get("/", response_class=HTMLResponse)
 def home():
 
-    return HTMLResponse("""
+    return """
 <!DOCTYPE html>
-
 <html lang="en">
 
 <head>
@@ -162,26 +347,33 @@ def home():
 
 body {
     margin: 0;
-    font-family: Arial, sans-serif;
-    background: linear-gradient(
-        135deg,
-        #081b3a,
-        #102f5c,
-        #173f73
-    );
-    color: white;
     min-height: 100vh;
+    font-family: Arial, sans-serif;
+
+    background:
+        radial-gradient(
+            circle at top left,
+            #dff7ec,
+            transparent 35%
+        ),
+        linear-gradient(
+            135deg,
+            #eefbf6,
+            #eaf4ff
+        );
+
+    color: #183b56;
 }
 
 .container {
-    max-width: 900px;
+    width: min(900px, 92%);
     margin: auto;
-    padding: 30px 20px 60px;
+    padding: 35px 0 50px;
 }
 
 .header {
     text-align: center;
-    margin-bottom: 35px;
+    margin-bottom: 30px;
 }
 
 .logo {
@@ -190,128 +382,154 @@ body {
 
 h1 {
     margin: 5px 0;
-    font-size: 38px;
+    font-size: 42px;
+    color: #123c55;
 }
 
 .subtitle {
-    color: #dce8ff;
-    font-size: 17px;
+    font-size: 18px;
+    color: #557080;
 }
 
 .card {
-    background: rgba(255,255,255,0.09);
-    border: 1px solid rgba(255,255,255,0.15);
+    background: rgba(255,255,255,0.88);
     border-radius: 24px;
-    padding: 30px;
-    margin-bottom: 22px;
-    backdrop-filter: blur(12px);
-    box-shadow: 0 15px 40px rgba(0,0,0,0.25);
+    padding: 28px;
+    margin-top: 20px;
+
+    box-shadow:
+        0 12px 35px rgba(30,80,100,0.10);
 }
 
 .section-title {
-    font-size: 24px;
-    margin-bottom: 20px;
+    font-size: 21px;
+    font-weight: bold;
+    margin-bottom: 18px;
 }
 
-.moods {
+.mood-grid {
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns:
+        repeat(auto-fit, minmax(130px, 1fr));
+
     gap: 12px;
 }
 
-.mood-btn {
-    background: #ffffff;
-    color: #10284d;
-    border: none;
-    padding: 18px 10px;
+.mood {
+    border: 2px solid #d8e9ef;
+    background: white;
+    padding: 15px 10px;
     border-radius: 16px;
-    font-size: 16px;
+
     cursor: pointer;
+    font-size: 16px;
+
     transition: 0.2s;
 }
 
-.mood-btn:hover {
-    transform: translateY(-3px);
-    background: #ffd84d;
+.mood:hover {
+    transform: translateY(-2px);
+    border-color: #63b99b;
 }
 
-.mood-btn.selected {
-    background: #ffd84d;
-    box-shadow: 0 0 0 3px rgba(255,216,77,0.3);
-}
-
-.primary-btn {
-    width: 100%;
-    padding: 17px;
-    margin-top: 22px;
-    border: none;
-    border-radius: 14px;
-    background: #ffd84d;
-    color: #10284d;
+.mood.selected {
+    background: #dff7ec;
+    border-color: #35a875;
     font-weight: bold;
-    font-size: 18px;
-    cursor: pointer;
-}
-
-.primary-btn:hover {
-    background: #ffe37a;
 }
 
 .activities {
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns:
+        repeat(auto-fit, minmax(180px, 1fr));
+
     gap: 15px;
 }
 
-.activity-btn {
-    padding: 22px 12px;
+.activity {
+    border: none;
     border-radius: 18px;
-    border: 1px solid rgba(255,255,255,0.2);
-    background: rgba(255,255,255,0.1);
-    color: white;
+    padding: 20px;
+
+    background: #f4f9ff;
+    color: #183b56;
+
     cursor: pointer;
-    font-size: 17px;
+
+    transition: 0.2s;
 }
 
-.activity-btn:hover {
-    background: rgba(255,216,77,0.2);
+.activity:hover {
     transform: translateY(-3px);
 }
 
-.output {
+.activity.selected {
+    background: #dff0ff;
+    outline: 3px solid #65a9d6;
+}
+
+.activity-icon {
+    font-size: 35px;
+}
+
+.activity-name {
+    font-size: 18px;
+    font-weight: bold;
+    margin-top: 8px;
+}
+
+.activity-desc {
+    color: #617582;
+    margin-top: 5px;
+}
+
+button.generate {
+    width: 100%;
+    border: none;
+
+    margin-top: 25px;
+    padding: 17px;
+
+    border-radius: 16px;
+
+    background: #247ba0;
+    color: white;
+
+    font-size: 18px;
+    font-weight: bold;
+
+    cursor: pointer;
+}
+
+button.generate:hover {
+    background: #1b6381;
+}
+
+button.generate:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.result {
+    display: none;
+
+    margin-top: 25px;
+
     background: white;
-    color: #172b4d;
-    border-radius: 18px;
-    padding: 25px;
+
+    border-radius: 22px;
+    padding: 30px;
+
     line-height: 1.7;
+
+    box-shadow:
+        0 10px 30px rgba(30,80,100,0.08);
+
     white-space: pre-wrap;
 }
 
-.checkins {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 12px;
-}
-
-.checkin-btn {
-    padding: 18px;
-    border: none;
-    border-radius: 15px;
-    cursor: pointer;
-    font-size: 16px;
-    background: #fff;
-    color: #10284d;
-}
-
-.checkin-btn:hover {
-    background: #ffd84d;
-}
-
-.hidden {
-    display: none;
-}
-
 .loading {
+    display: none;
     text-align: center;
     padding: 20px;
     font-size: 18px;
@@ -319,35 +537,13 @@ h1 {
 
 .footer {
     text-align: center;
-    color: #b9c8df;
     margin-top: 30px;
-    font-size: 14px;
-}
-
-@media(max-width:700px) {
-
-    .moods {
-        grid-template-columns: repeat(2, 1fr);
-    }
-
-    .activities {
-        grid-template-columns: 1fr;
-    }
-
-    .checkins {
-        grid-template-columns: 1fr;
-    }
-
-    h1 {
-        font-size: 30px;
-    }
-
+    color: #708895;
 }
 
 </style>
 
 </head>
-
 
 <body>
 
@@ -363,209 +559,153 @@ h1 {
             Your little AI-powered stress-buster 💙
         </div>
 
-        <div class="subtitle">
+        <p>
             Take a 2-minute break. You deserve it.
-        </div>
+        </p>
 
     </div>
 
 
-    <!-- STEP 1 -->
-
-    <div class="card" id="moodCard">
+    <div class="card">
 
         <div class="section-title">
             😊 How are you feeling right now?
         </div>
 
-        <div class="moods">
+        <div class="mood-grid">
 
-            <button class="mood-btn" onclick="selectMood('Stressed', this)">
+            <button class="mood"
+                    onclick="selectMood(this, 'Stressed')">
                 😰 Stressed
             </button>
 
-            <button class="mood-btn" onclick="selectMood('Sad', this)">
+            <button class="mood"
+                    onclick="selectMood(this, 'Sad')">
                 😔 Sad
             </button>
 
-            <button class="mood-btn" onclick="selectMood('Tired', this)">
+            <button class="mood"
+                    onclick="selectMood(this, 'Tired')">
                 😴 Tired
             </button>
 
-            <button class="mood-btn" onclick="selectMood('Angry', this)">
+            <button class="mood"
+                    onclick="selectMood(this, 'Angry')">
                 😡 Angry
             </button>
 
-            <button class="mood-btn" onclick="selectMood('Worried', this)">
+            <button class="mood"
+                    onclick="selectMood(this, 'Worried')">
                 😟 Worried
             </button>
 
-            <button class="mood-btn" onclick="selectMood('Overwhelmed', this)">
+            <button class="mood"
+                    onclick="selectMood(this, 'Overwhelmed')">
                 😵 Overwhelmed
             </button>
 
-            <button class="mood-btn" onclick="selectMood('Okay', this)">
+            <button class="mood"
+                    onclick="selectMood(this, 'Okay')">
                 🙂 Okay
             </button>
 
-            <button class="mood-btn" onclick="selectMood('Excited', this)">
+            <button class="mood"
+                    onclick="selectMood(this, 'Excited')">
                 🤩 Excited
             </button>
 
         </div>
 
-        <button
-            class="primary-btn"
-            onclick="understandMood()">
-
-            💙 Help Me Feel Better
-
-        </button>
-
     </div>
 
 
-    <!-- STEP 2 -->
-
-    <div class="card hidden" id="activityCard">
+    <div class="card">
 
         <div class="section-title">
             🤖 What would you like to do?
         </div>
 
-        <div id="moodMessage" class="output"></div>
-
-        <br>
-
         <div class="activities">
 
-            <button
-                class="activity-btn"
-                onclick="startActivity('Calm Me')">
+            <button class="activity"
+                    onclick="selectActivity(this, 'Calm Me')">
 
-                🧘<br>
-                <b>Calm Me</b>
-                <br>
-                <small>Relax your mind</small>
+                <div class="activity-icon">
+                    🧘
+                </div>
 
-            </button>
+                <div class="activity-name">
+                    Calm Me
+                </div>
 
-
-            <button
-                class="activity-btn"
-                onclick="startActivity('Distract Me')">
-
-                🎮<br>
-                <b>Distract Me</b>
-                <br>
-                <small>Give me something fun</small>
+                <div class="activity-desc">
+                    Relax your mind
+                </div>
 
             </button>
 
 
-            <button
-                class="activity-btn"
-                onclick="startActivity('Cheer Me Up')">
+            <button class="activity"
+                    onclick="selectActivity(this, 'Distract Me')">
 
-                📖<br>
-                <b>Cheer Me Up</b>
-                <br>
-                <small>Make me smile</small>
+                <div class="activity-icon">
+                    🎮
+                </div>
+
+                <div class="activity-name">
+                    Distract Me
+                </div>
+
+                <div class="activity-desc">
+                    Give me something fun
+                </div>
+
+            </button>
+
+
+            <button class="activity"
+                    onclick="selectActivity(this, 'Cheer Me Up')">
+
+                <div class="activity-icon">
+                    📖
+                </div>
+
+                <div class="activity-name">
+                    Cheer Me Up
+                </div>
+
+                <div class="activity-desc">
+                    Make me smile
+                </div>
 
             </button>
 
         </div>
 
-    </div>
 
+        <button class="generate"
+                id="generateButton"
+                onclick="generateActivity()"
+                disabled>
 
-    <!-- STEP 3 -->
-
-    <div class="card hidden" id="activityResultCard">
-
-        <div class="section-title" id="activityTitle">
-            ✨ Your activity
-        </div>
-
-        <div id="activityResult" class="output"></div>
-
-        <button
-            class="primary-btn"
-            onclick="showCheckin()">
-
-            🌱 I'm Done — Check In
+            💙 Help Me Feel Better
 
         </button>
 
-    </div>
-
-
-    <!-- STEP 4 -->
-
-    <div class="card hidden" id="checkinCard">
-
-        <div class="section-title">
-
-            💙 How do you feel now?
-
-        </div>
-
-        <div class="checkins">
-
-            <button
-                class="checkin-btn"
-                onclick="checkin('Better')">
-
-                😊 Much Better
-
-            </button>
-
-            <button
-                class="checkin-btn"
-                onclick="checkin('A Little Better')">
-
-                🙂 A Little Better
-
-            </button>
-
-            <button
-                class="checkin-btn"
-                onclick="checkin('Same')">
-
-                😐 Same
-
-            </button>
-
+        <div class="loading" id="loading">
+            🌱 MindMate is preparing your little break...
         </div>
 
     </div>
 
 
-    <!-- STEP 5 -->
-
-    <div class="card hidden" id="finalCard">
-
-        <div class="section-title">
-            🌈 Your MindMate Moment
-        </div>
-
-        <div id="finalResult" class="output"></div>
-
-        <button
-            class="primary-btn"
-            onclick="restart()">
-
-            🔄 Start Another Break
-
-        </button>
-
+    <div class="result"
+         id="result">
     </div>
 
 
     <div class="footer">
-
-        🌱 MindMate AI • A small break can make a big difference.
-
+        🌱 MindMate AI • A small break can make a big difference 💙
     </div>
 
 </div>
@@ -575,261 +715,141 @@ h1 {
 
 let selectedMood = "";
 let selectedActivity = "";
-let lastActivity = "";
 
 
-function selectMood(mood, button) {
+function selectMood(button, mood) {
+
+    document
+        .querySelectorAll(".mood")
+        .forEach(item => {
+            item.classList.remove("selected");
+        });
+
+    button.classList.add("selected");
 
     selectedMood = mood;
 
+    updateButton();
+
+}
+
+
+function selectActivity(button, activity) {
+
     document
-        .querySelectorAll(".mood-btn")
-        .forEach(btn => btn.classList.remove("selected"));
+        .querySelectorAll(".activity")
+        .forEach(item => {
+            item.classList.remove("selected");
+        });
 
     button.classList.add("selected");
-}
-
-
-async function understandMood() {
-
-    if (!selectedMood) {
-
-        alert("Please choose how you are feeling first 💙");
-
-        return;
-    }
-
-    document.getElementById("activityCard")
-        .classList.remove("hidden");
-
-    document.getElementById("moodMessage")
-        .innerText = "🤖 MindMate is thinking...";
-
-    try {
-
-        const response = await fetch("/api/start", {
-
-            method: "POST",
-
-            headers: {
-                "Content-Type": "application/json"
-            },
-
-            body: JSON.stringify({
-                mood: selectedMood
-            })
-
-        });
-
-        const data = await response.json();
-
-        if (!response.ok) {
-
-            throw new Error(data.detail || "Something went wrong");
-
-        }
-
-        document.getElementById("moodMessage")
-            .innerText =
-                data.message;
-
-    } catch(error) {
-
-        document.getElementById("moodMessage")
-            .innerText =
-                "💙 Let's take a small break together.";
-
-    }
-
-    document
-        .getElementById("activityCard")
-        .scrollIntoView({
-            behavior: "smooth"
-        });
-}
-
-
-async function startActivity(activity) {
 
     selectedActivity = activity;
 
-    document
-        .getElementById("activityResultCard")
-        .classList.remove("hidden");
+    updateButton();
 
-    document
-        .getElementById("activityResult")
-        .innerText = "✨ Creating your activity...";
+}
 
-    document
-        .getElementById("activityTitle")
-        .innerText =
-            activity + " ✨";
+
+function updateButton() {
+
+    const button =
+        document.getElementById("generateButton");
+
+    button.disabled =
+        !(selectedMood && selectedActivity);
+
+}
+
+
+async function generateActivity() {
+
+    const result =
+        document.getElementById("result");
+
+    const loading =
+        document.getElementById("loading");
+
+    const button =
+        document.getElementById("generateButton");
+
+
+    result.style.display = "none";
+
+    loading.style.display = "block";
+
+    button.disabled = true;
+
 
     try {
 
-        const response = await fetch("/api/activity", {
+        const response =
+            await fetch("/api/start", {
 
-            method: "POST",
+                method: "POST",
 
-            headers: {
-                "Content-Type": "application/json"
-            },
+                headers: {
+                    "Content-Type":
+                        "application/json"
+                },
 
-            body: JSON.stringify({
+                body: JSON.stringify({
 
-                mood: selectedMood,
-                activity: activity
+                    mood: selectedMood,
 
-            })
+                    activity: selectedActivity
 
-        });
+                })
 
-        const data = await response.json();
+            });
 
-        if (!response.ok) {
+
+        const data =
+            await response.json();
+
+
+        if (!data.success) {
 
             throw new Error(
-                data.detail ||
-                "Unable to create activity"
+                data.message ||
+                "Something went wrong."
             );
 
         }
 
-        lastActivity = data.activity;
 
-        document
-            .getElementById("activityResult")
-            .innerText =
-                data.activity;
+        result.textContent =
+            data.response;
 
-    } catch(error) {
+        result.style.display =
+            "block";
 
-        document
-            .getElementById("activityResult")
-            .innerText =
-                "💙 Something went wrong. Please try again.";
+
+        result.scrollIntoView({
+            behavior: "smooth",
+            block: "start"
+        });
+
+
+    } catch (error) {
+
+        result.textContent =
+            "💙 Something went wrong. Please try again.";
+
+        result.style.display =
+            "block";
+
+        console.error(error);
+
+    } finally {
+
+        loading.style.display =
+            "none";
+
+        updateButton();
 
     }
 
-    document
-        .getElementById("activityResultCard")
-        .scrollIntoView({
-            behavior: "smooth"
-        });
-}
-
-
-function showCheckin() {
-
-    document
-        .getElementById("checkinCard")
-        .classList.remove("hidden");
-
-    document
-        .getElementById("checkinCard")
-        .scrollIntoView({
-            behavior: "smooth"
-        });
-}
-
-
-async function checkin(feeling) {
-
-    document
-        .getElementById("finalCard")
-        .classList.remove("hidden");
-
-    document
-        .getElementById("finalResult")
-        .innerText =
-            "💙 MindMate is preparing your next step...";
-
-    try {
-
-        const response = await fetch("/api/checkin", {
-
-            method: "POST",
-
-            headers: {
-                "Content-Type": "application/json"
-            },
-
-            body: JSON.stringify({
-
-                mood: selectedMood,
-                activity: selectedActivity,
-                feeling: feeling
-
-            })
-
-        });
-
-        const data = await response.json();
-
-        if (!response.ok) {
-
-            throw new Error(
-                data.detail ||
-                "Something went wrong"
-            );
-
-        }
-
-        document
-            .getElementById("finalResult")
-            .innerText =
-                data.message;
-
-    } catch(error) {
-
-        document
-            .getElementById("finalResult")
-            .innerText =
-                "🌱 You did something good for yourself today. Keep going! 💙";
-
-    }
-
-    document
-        .getElementById("finalCard")
-        .scrollIntoView({
-            behavior: "smooth"
-        });
-}
-
-
-function restart() {
-
-    selectedMood = "";
-    selectedActivity = "";
-    lastActivity = "";
-
-    document
-        .querySelectorAll(".mood-btn")
-        .forEach(btn =>
-            btn.classList.remove("selected")
-        );
-
-    document
-        .getElementById("activityCard")
-        .classList.add("hidden");
-
-    document
-        .getElementById("activityResultCard")
-        .classList.add("hidden");
-
-    document
-        .getElementById("checkinCard")
-        .classList.add("hidden");
-
-    document
-        .getElementById("finalCard")
-        .classList.add("hidden");
-
-    window.scrollTo({
-        top: 0,
-        behavior: "smooth"
-    });
 }
 
 </script>
@@ -837,200 +857,21 @@ function restart() {
 </body>
 
 </html>
-""")
-
-
-# ============================================================
-# STEP 1 → UNDERSTAND MOOD
-# ============================================================
-
-@app.post("/api/start")
-def start(request: StartRequest):
-
-    mood = request.mood.strip()
-
-    if contains_risk_language(mood):
-        return safety_response()
-
-    prompt = f"""
-You are MindMate AI, a friendly student stress-buster.
-
-A student says they feel: {mood}
-
-Respond in a warm and friendly way.
-
-Rules:
-- Use simple English.
-- Use emojis.
-- Do not diagnose the student.
-- Do not give medical advice.
-- Keep the response under 70 words.
-- Acknowledge their feeling.
-- Tell them they don't need to solve everything immediately.
-- Encourage a short break.
-- Do not ask many questions.
-
-Return only the response.
 """
 
-    message = ask_gemini(prompt)
-
-    return {
-        "mood": mood,
-        "message": message
-    }
-
 
 # ============================================================
-# STEP 2 → CREATE ACTIVITY
+# LOCAL DEVELOPMENT
 # ============================================================
 
-@app.post("/api/activity")
-def create_activity(request: ActivityRequest):
+if __name__ == "__main__":
 
-    mood = request.mood.strip()
-    activity = request.activity.strip()
+    import uvicorn
 
-    if contains_risk_language(mood):
-        return safety_response()
+    port = int(os.getenv("PORT", "8000"))
 
-    prompts = {
-
-        "Calm Me": """
-Create a very short calming activity for a college student.
-
-Include:
-🌬️ breathing or grounding
-⏱️ approximately 1–2 minutes
-🌱 simple instructions
-💙 one encouraging sentence
-
-Do not make it complicated.
-""",
-
-        "Distract Me": """
-Create a tiny fun activity for a college student.
-
-Choose ONE:
-- funny challenge
-- simple puzzle
-- imagination game
-- silly question
-- mini guessing game
-
-Make it playful.
-Use emojis.
-Keep it under 150 words.
-Do not make it academic.
-""",
-
-        "Cheer Me Up": """
-Create a short cheerful mini-story for a college student.
-
-The story should:
-- be funny, magical or heartwarming
-- use simple English
-- have a happy ending
-- use emojis
-- be around 150 words
-- make the student smile
-
-Do not make it about studying.
-"""
-    }
-
-    selected_prompt = prompts.get(
-        activity,
-        prompts["Distract Me"]
+    uvicorn.run(
+        "app:app",
+        host="0.0.0.0",
+        port=port
     )
-
-    prompt = f"""
-You are MindMate AI.
-
-Student mood:
-{mood}
-
-Chosen activity:
-{activity}
-
-{selected_prompt}
-
-The purpose is to provide a small positive break,
-not to solve the student's life problems.
-
-Return only the activity.
-"""
-
-    result = ask_gemini(prompt)
-
-    return {
-        "activity": result
-    }
-
-
-# ============================================================
-# STEP 3 → CHECK-IN
-# ============================================================
-
-@app.post("/api/checkin")
-def checkin(request: CheckinRequest):
-
-    mood = request.mood.strip()
-    activity = request.activity.strip()
-    feeling = request.feeling.strip()
-
-    prompt = f"""
-You are MindMate AI, a supportive student stress-buster.
-
-Initial mood:
-{mood}
-
-Activity:
-{activity}
-
-Student says they now feel:
-{feeling}
-
-Create the next response.
-
-If the student feels "Better" or "A Little Better":
-- celebrate gently
-- give a positive message
-- remind them that small breaks matter
-- end warmly
-
-If the student feels "Same":
-- do NOT say they failed
-- acknowledge that one activity may not be enough
-- suggest another tiny activity
-- give 2 or 3 choices
-
-Use simple English.
-Use emojis.
-Keep it under 120 words.
-
-Do not diagnose.
-Do not give medical advice.
-
-Return only the response.
-"""
-
-    result = ask_gemini(prompt)
-
-    return {
-        "message": result
-    }
-
-
-# ============================================================
-# HEALTH CHECK
-# ============================================================
-
-@app.get("/health")
-def health():
-
-    return {
-        "status": "healthy",
-        "application": "MindMate AI",
-        "model": MODEL
-    }
