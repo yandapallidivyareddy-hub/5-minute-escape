@@ -280,38 +280,41 @@ def get_joke():
 # ============================================================
 
 def get_movies():
+    """
+    Get movie recommendations from Watchmode.
 
-    if not TMDB_TOKEN:
+    Uses WATCHMODE_API_KEY from Render Environment Variables.
+    Avoids showing movies that were already displayed in this session.
+    """
 
+    if not WATCHMODE_API_KEY:
         return {
             "title": "🎬 Movie Break",
             "content": (
-                "Add your TMDB_ACCESS_TOKEN in Render Environment "
-                "Variables to get live movie recommendations. 🎬"
+                "Movie recommendations are not configured yet. "
+                "Please add WATCHMODE_API_KEY in Render Environment Variables. 🍿"
             ),
             "movies": []
         }
 
     try:
-
         headers = {
-            "Authorization": f"Bearer {TMDB_TOKEN}",
             "accept": "application/json"
         }
 
-        params = {
-            "language": "en-US",
-            "sort_by": "popularity.desc",
-            "include_adult": "false",
-            "include_video": "false",
-            "page": random.randint(1, 5)
-        }
-
+        # Watchmode API
         response = requests.get(
-            f"{TMDB_URL}/discover/movie",
+            "https://api.watchmode.com/v1/list-titles/",
+            params={
+                "apiKey": WATCHMODE_API_KEY,
+                "types": "movie",
+                "source_ids": "netflix",
+                "regions": "IN",
+                "limit": 20,
+                "sort_by": "popularity_desc"
+            },
             headers=headers,
-            params=params,
-            timeout=8
+            timeout=10
         )
 
         response.raise_for_status()
@@ -320,10 +323,14 @@ def get_movies():
 
         movies = []
 
-        for movie in data.get("results", []):
+        for movie in data.get("titles", []):
 
             movie_id = movie.get("id")
 
+            if not movie_id:
+                continue
+
+            # Don't repeat movies in the same session
             if movie_id in session_history["movies"]:
                 continue
 
@@ -331,25 +338,27 @@ def get_movies():
 
             movies.append({
                 "id": movie_id,
-                "title": movie.get("title", "Unknown Movie"),
-                "overview": movie.get(
-                    "overview",
-                    "A movie worth checking out!"
+                "title": movie.get(
+                    "title",
+                    "Unknown Movie"
                 ),
-                "rating": round(
-                    movie.get("vote_average", 0),
-                    1
+                "overview": (
+                    movie.get("plot_overview")
+                    or "A movie worth checking out! 🍿"
+                ),
+                "rating": movie.get(
+                    "user_rating",
+                    "N/A"
                 ),
                 "release_date": movie.get(
                     "release_date",
                     ""
                 ),
-                "poster": (
-                    "https://image.tmdb.org/t/p/w500"
-                    + movie["poster_path"]
-                    if movie.get("poster_path")
-                    else ""
-                )
+                "poster": movie.get(
+                    "poster",
+                    ""
+                ),
+                "type": "movie"
             })
 
             if len(movies) >= 4:
@@ -357,18 +366,44 @@ def get_movies():
 
         return {
             "title": "🎬 Movie Break",
-            "content": "Here are some movies you might enjoy!",
+            "content": (
+                "Here are some movies for your little escape! 🍿✨"
+            ),
             "movies": movies
         }
 
-    except Exception as e:
+    except requests.exceptions.Timeout:
 
         return {
             "title": "🎬 Movie Break",
-            "content": "I couldn't reach the movie service right now. Try again in a moment! 🍿",
+            "content": (
+                "The movie service took too long to respond. "
+                "Let's try again! 🍿"
+            ),
             "movies": []
         }
 
+    except requests.exceptions.RequestException:
+
+        return {
+            "title": "🎬 Movie Break",
+            "content": (
+                "I couldn't connect to the movie service right now. "
+                "Try another movie in a moment! 🎬"
+            ),
+            "movies": []
+        }
+
+    except Exception:
+
+        return {
+            "title": "🎬 Movie Break",
+            "content": (
+                "Something went wrong while finding movies. "
+                "Let's try again! 🍿"
+            ),
+            "movies": []
+        }
 
 # ============================================================
 # FUN FACT
