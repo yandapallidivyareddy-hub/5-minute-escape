@@ -1,7 +1,4 @@
 fastapi
 uvicorn
-langchain
-langchain-core
-langchain-google-genai
 google-genai
 pydantic
