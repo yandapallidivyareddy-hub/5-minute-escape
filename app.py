@@ -1,320 +1,146 @@
 import os
+import json
 import random
-import re
+from typing import Optional
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
-from langchain_google_genai import ChatGoogleGenerativeAI
+from google import genai
+from google.genai import types
 
 
 # ============================================================
-# APP
+# CONFIGURATION
+# ============================================================
+
+API_KEY = os.getenv("GEMINI_API_KEY")
+
+if not API_KEY:
+    raise RuntimeError(
+        "GEMINI_API_KEY is not configured. "
+        "Add it in Render → Environment Variables."
+    )
+
+client = genai.Client(api_key=API_KEY)
+
+# Current stable Gemini model
+MODEL = "gemini-3.5-flash"
+
+
+# ============================================================
+# FASTAPI
 # ============================================================
 
 app = FastAPI(
-    title="5-Minute Escape AI",
-    description="An interactive AI escape adventure for students",
+    title="MindMate AI",
+    description="AI-powered Student Stress-Buster",
     version="1.0.0"
 )
 
 
 # ============================================================
-# GEMINI CONFIGURATION
+# REQUEST MODELS
 # ============================================================
 
-API_KEY = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
-
-if not API_KEY:
-    raise RuntimeError(
-        "GOOGLE_API_KEY or GEMINI_API_KEY is not configured in Render."
-    )
-
-
-MODEL_NAME = os.getenv(
-    "GEMINI_MODEL",
-    "gemini-3-flash-preview"
-)
-
-
-llm = ChatGoogleGenerativeAI(
-    model=MODEL_NAME,
-    google_api_key=API_KEY,
-    temperature=0.9,
-    max_output_tokens=1200
-)
-
-
-# ============================================================
-# REQUEST MODEL
-# ============================================================
-
-class EscapeRequest(BaseModel):
+class StartRequest(BaseModel):
     mood: str
-    world: str
 
 
-class ContinueRequest(BaseModel):
+class ActivityRequest(BaseModel):
     mood: str
-    world: str
-    story: str
-    choice: str
-    turn: int
+    activity: str
+
+
+class CheckinRequest(BaseModel):
+    mood: str
+    activity: str
+    feeling: str
 
 
 # ============================================================
-# HELPERS
+# BASIC SAFETY CHECK
 # ============================================================
 
-def clean_text(text):
+RISK_WORDS = [
+    "suicide",
+    "kill myself",
+    "end my life",
+    "hurt myself",
+    "self harm",
+    "self-harm",
+    "die",
+    "want to die"
+]
 
-    if not text:
-        return "✨ The magical world is quiet for a moment. Try again."
 
-    # Handle Gemini content blocks
-    if isinstance(text, list):
+def contains_risk_language(text: str) -> bool:
+    text = text.lower()
 
-        parts = []
-
-        for item in text:
-
-            if isinstance(item, dict):
-
-                if item.get("type") == "text":
-                    parts.append(item.get("text", ""))
-
-            elif isinstance(item, str):
-                parts.append(item)
-
-        text = "\n".join(parts)
-
-    text = str(text)
-
-    # Remove accidental code blocks
-    text = re.sub(
-        r"```.*?```",
-        "",
-        text,
-        flags=re.DOTALL
+    return any(
+        phrase in text
+        for phrase in RISK_WORDS
     )
 
-    # Remove unnecessary labels
-    text = re.sub(
-        r"^(story|response|answer)\s*:\s*",
-        "",
-        text,
-        flags=re.IGNORECASE
-    )
 
-    # Clean excessive blank lines
-    text = re.sub(
-        r"\n{3,}",
-        "\n\n",
-        text
-    )
-
-    return text.strip()
-
-
-# ============================================================
-# INITIAL ADVENTURE
-# ============================================================
-
-def create_escape(mood, world):
-
-    prompt = f"""
-You are the narrator of a short, peaceful, magical interactive
-adventure called "5-Minute Escape AI".
-
-The student currently feels:
-{mood}
-
-The student has entered:
-{world}
-
-Create the opening scene of the adventure.
-
-IMPORTANT:
-
-- Use simple, friendly English.
-- Make it imaginative and comforting.
-- Make it feel like a small escape from everyday student life.
-- Do not mention therapy, diagnosis, mental illness, or treatment.
-- Do not give medical advice.
-- Do not mention AI.
-- Do not generate images.
-- Use emojis naturally.
-- Do not make the story frightening.
-- Avoid violence.
-- Keep the atmosphere warm, magical and relaxing.
-- Write approximately 250-350 words.
-- End with EXACTLY three choices.
-- Each choice must be clearly labelled A, B and C.
-- The choices should lead to different story directions.
-
-Format:
-
-🌌 [Adventure Title]
-
-[Opening scene]
-
-✨ What will you do?
-
-🅰️ [Choice A]
-🅱️ [Choice B]
-🅲️ [Choice C]
-"""
-
-    response = llm.invoke(prompt)
-
-    return clean_text(response.content)
+def safety_response():
+    return {
+        "title": "💙 You don't have to handle this alone",
+        "message": (
+            "I'm really sorry you're going through something this heavy. "
+            "An AI cannot provide the kind of help you may need right now. "
+            "Please reach out to someone you trust, such as a parent, "
+            "friend, teacher, counselor, or another trusted person, "
+            "and stay with someone if you can."
+        ),
+        "activities": [
+            "💙 Talk to someone you trust",
+            "📞 Contact a local emergency or crisis service",
+            "🏫 Reach out to a teacher or college counselor",
+            "🌿 Stay with someone rather than being alone"
+        ]
+    }
 
 
 # ============================================================
-# CONTINUE ADVENTURE
+# GEMINI HELPER
 # ============================================================
 
-def continue_escape(mood, world, story, choice, turn):
+def ask_gemini(prompt: str) -> str:
 
-    prompt = f"""
-You are continuing an interactive magical adventure.
+    try:
 
-Adventure world:
-{world}
+        response = client.models.generate_content(
+            model=MODEL,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                max_output_tokens=800
+            )
+        )
 
-Student mood at the beginning:
-{mood}
+        if not response.text:
+            raise ValueError("Gemini returned an empty response.")
 
-The adventure so far:
-{story}
+        return response.text.strip()
 
-The student chose:
-{choice}
+    except Exception as e:
 
-This is adventure turn:
-{turn}
+        print("Gemini error:", repr(e))
 
-Continue the story based on the student's choice.
-
-IMPORTANT:
-
-- Use simple English.
-- Be creative and surprising.
-- Keep the story peaceful, positive and playful.
-- Make the student feel like they are inside the adventure.
-- Use emojis naturally.
-- No images.
-- No image prompts.
-- No AI references.
-- No therapy or medical advice.
-- No violence.
-- Keep the story suitable for students.
-- Write approximately 180-280 words.
-
-If this is turn 4 or later:
-
-END the adventure naturally.
-
-Give the student a peaceful conclusion and include:
-
-🌅 Your escape is complete.
-
-Take a small breath.
-Look around you.
-You are back in the real world.
-
-✨ Welcome back!
-
-Otherwise, end with EXACTLY three new choices:
-
-✨ What will you do next?
-
-🅰️ [Choice A]
-🅱️ [Choice B]
-🅲️ [Choice C]
-"""
-
-    response = llm.invoke(prompt)
-
-    return clean_text(response.content)
+        raise HTTPException(
+            status_code=500,
+            detail="Unable to generate the activity right now. Please try again."
+        )
 
 
 # ============================================================
-# API ROUTES
+# HOME PAGE
 # ============================================================
 
 @app.get("/", response_class=HTMLResponse)
 def home():
 
-    return HTML_PAGE
-
-
-@app.get("/health")
-def health():
-
-    return {
-        "status": "healthy",
-        "service": "5-Minute Escape AI",
-        "model": MODEL_NAME
-    }
-
-
-@app.post("/start")
-def start_escape(request: EscapeRequest):
-
-    try:
-
-        story = create_escape(
-            request.mood,
-            request.world
-        )
-
-        return {
-            "success": True,
-            "story": story,
-            "turn": 1
-        }
-
-    except Exception as e:
-
-        return {
-            "success": False,
-            "error": str(e)
-        }
-
-
-@app.post("/continue")
-def continue_adventure(request: ContinueRequest):
-
-    try:
-
-        new_story = continue_escape(
-            request.mood,
-            request.world,
-            request.story,
-            request.choice,
-            request.turn
-        )
-
-        return {
-            "success": True,
-            "story": new_story,
-            "turn": request.turn + 1
-        }
-
-    except Exception as e:
-
-        return {
-            "success": False,
-            "error": str(e)
-        }
-
-
-# ============================================================
-# FRONTEND
-# ============================================================
-
-HTML_PAGE = r"""
+    return HTMLResponse("""
 <!DOCTYPE html>
 
 <html lang="en">
@@ -324,10 +150,9 @@ HTML_PAGE = r"""
 <meta charset="UTF-8">
 
 <meta name="viewport"
-content="width=device-width, initial-scale=1.0">
+      content="width=device-width, initial-scale=1.0">
 
-<title>5-Minute Escape AI</title>
-
+<title>MindMate AI</title>
 
 <style>
 
@@ -335,403 +160,186 @@ content="width=device-width, initial-scale=1.0">
     box-sizing: border-box;
 }
 
-
 body {
-
     margin: 0;
-
-    min-height: 100vh;
-
-    font-family:
-        Arial,
-        Helvetica,
-        sans-serif;
-
-    background:
-        radial-gradient(
-            circle at top,
-            #17366b,
-            #07152f 55%,
-            #030b1c
-        );
-
+    font-family: Arial, sans-serif;
+    background: linear-gradient(
+        135deg,
+        #081b3a,
+        #102f5c,
+        #173f73
+    );
     color: white;
-
-    padding: 25px 15px;
-
+    min-height: 100vh;
 }
-
 
 .container {
-
-    width: 100%;
-
     max-width: 900px;
-
     margin: auto;
-
+    padding: 30px 20px 60px;
 }
-
 
 .header {
-
     text-align: center;
-
-    padding: 20px 0 30px;
-
+    margin-bottom: 35px;
 }
-
 
 .logo {
-
-    font-size: 52px;
-
+    font-size: 55px;
 }
-
 
 h1 {
-
-    margin: 8px 0;
-
-    font-size: 42px;
-
-    color: #ffd43b;
-
+    margin: 5px 0;
+    font-size: 38px;
 }
-
 
 .subtitle {
-
-    color: #c9d8f2;
-
+    color: #dce8ff;
     font-size: 17px;
-
-    line-height: 1.6;
-
 }
-
 
 .card {
-
-    background:
-        rgba(255,255,255,0.08);
-
-    border:
-        1px solid rgba(255,255,255,0.15);
-
+    background: rgba(255,255,255,0.09);
+    border: 1px solid rgba(255,255,255,0.15);
     border-radius: 24px;
-
     padding: 30px;
-
-    margin-bottom: 25px;
-
-    backdrop-filter: blur(15px);
-
-    box-shadow:
-        0 20px 50px rgba(0,0,0,0.3);
-
+    margin-bottom: 22px;
+    backdrop-filter: blur(12px);
+    box-shadow: 0 15px 40px rgba(0,0,0,0.25);
 }
-
 
 .section-title {
-
-    font-size: 20px;
-
-    font-weight: bold;
-
-    color: #ffd43b;
-
-    margin-bottom: 15px;
-
-}
-
-
-.options {
-
-    display: grid;
-
-    grid-template-columns:
-        repeat(2, 1fr);
-
-    gap: 12px;
-
-    margin-bottom: 25px;
-
-}
-
-
-.option {
-
-    padding: 16px;
-
-    border-radius: 14px;
-
-    border:
-        1px solid rgba(255,255,255,0.15);
-
-    background:
-        rgba(255,255,255,0.06);
-
-    color: white;
-
-    cursor: pointer;
-
-    font-size: 16px;
-
-    transition: 0.2s;
-
-}
-
-
-.option:hover {
-
-    transform: translateY(-2px);
-
-    background:
-        rgba(255,212,59,0.15);
-
-}
-
-
-.option.selected {
-
-    background: #ffd43b;
-
-    color: #07152f;
-
-    border-color: #ffd43b;
-
-    font-weight: bold;
-
-}
-
-
-.start-btn {
-
-    width: 100%;
-
-    padding: 17px;
-
-    border: none;
-
-    border-radius: 14px;
-
-    background: #ffd43b;
-
-    color: #07152f;
-
-    font-size: 18px;
-
-    font-weight: bold;
-
-    cursor: pointer;
-
-    transition: 0.2s;
-
-}
-
-
-.start-btn:hover {
-
-    transform: translateY(-2px);
-
-    box-shadow:
-        0 8px 25px rgba(255,212,59,0.3);
-
-}
-
-
-.start-btn:disabled {
-
-    opacity: 0.6;
-
-    cursor: wait;
-
-}
-
-
-.adventure {
-
-    display: none;
-
-    background: #fffdf6;
-
-    color: #263238;
-
-    border-radius: 24px;
-
-    padding: 35px;
-
-    box-shadow:
-        0 20px 60px rgba(0,0,0,0.4);
-
-}
-
-
-.adventure-title {
-
-    text-align: center;
-
-    color: #102d5c;
-
-    font-size: 26px;
-
+    font-size: 24px;
     margin-bottom: 20px;
-
 }
 
-
-.story {
-
-    font-family:
-        Georgia,
-        "Times New Roman",
-        serif;
-
-    font-size: 18px;
-
-    line-height: 1.9;
-
-    white-space: pre-wrap;
-
-}
-
-
-.choice-area {
-
-    margin-top: 25px;
-
+.moods {
     display: grid;
-
+    grid-template-columns: repeat(4, 1fr);
     gap: 12px;
-
 }
 
-
-.choice {
-
-    padding: 15px;
-
-    border-radius: 13px;
-
-    border: 2px solid #d9c55a;
-
-    background: #fff9d8;
-
-    color: #102d5c;
-
+.mood-btn {
+    background: #ffffff;
+    color: #10284d;
+    border: none;
+    padding: 18px 10px;
+    border-radius: 16px;
     font-size: 16px;
-
-    font-weight: bold;
-
     cursor: pointer;
-
-    text-align: left;
-
     transition: 0.2s;
-
 }
 
-
-.choice:hover {
-
-    background: #ffe979;
-
-    transform: translateX(3px);
-
+.mood-btn:hover {
+    transform: translateY(-3px);
+    background: #ffd84d;
 }
 
+.mood-btn.selected {
+    background: #ffd84d;
+    box-shadow: 0 0 0 3px rgba(255,216,77,0.3);
+}
+
+.primary-btn {
+    width: 100%;
+    padding: 17px;
+    margin-top: 22px;
+    border: none;
+    border-radius: 14px;
+    background: #ffd84d;
+    color: #10284d;
+    font-weight: bold;
+    font-size: 18px;
+    cursor: pointer;
+}
+
+.primary-btn:hover {
+    background: #ffe37a;
+}
+
+.activities {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 15px;
+}
+
+.activity-btn {
+    padding: 22px 12px;
+    border-radius: 18px;
+    border: 1px solid rgba(255,255,255,0.2);
+    background: rgba(255,255,255,0.1);
+    color: white;
+    cursor: pointer;
+    font-size: 17px;
+}
+
+.activity-btn:hover {
+    background: rgba(255,216,77,0.2);
+    transform: translateY(-3px);
+}
+
+.output {
+    background: white;
+    color: #172b4d;
+    border-radius: 18px;
+    padding: 25px;
+    line-height: 1.7;
+    white-space: pre-wrap;
+}
+
+.checkins {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+}
+
+.checkin-btn {
+    padding: 18px;
+    border: none;
+    border-radius: 15px;
+    cursor: pointer;
+    font-size: 16px;
+    background: #fff;
+    color: #10284d;
+}
+
+.checkin-btn:hover {
+    background: #ffd84d;
+}
+
+.hidden {
+    display: none;
+}
 
 .loading {
-
-    display: none;
-
     text-align: center;
-
-    color: #ffd43b;
-
-    margin-top: 15px;
-
-    font-weight: bold;
-
+    padding: 20px;
+    font-size: 18px;
 }
-
-
-.error {
-
-    display: none;
-
-    margin-top: 15px;
-
-    background: #641f2a;
-
-    padding: 12px;
-
-    border-radius: 10px;
-
-    color: #ffd8dd;
-
-}
-
-
-.restart {
-
-    display: none;
-
-    margin-top: 25px;
-
-    width: 100%;
-
-    padding: 14px;
-
-    border: none;
-
-    border-radius: 12px;
-
-    background: #102d5c;
-
-    color: white;
-
-    cursor: pointer;
-
-    font-weight: bold;
-
-}
-
 
 .footer {
-
     text-align: center;
-
-    color: #91a8cc;
-
-    padding: 15px;
-
+    color: #b9c8df;
+    margin-top: 30px;
     font-size: 14px;
-
 }
 
+@media(max-width:700px) {
 
-@media(max-width:600px) {
-
-    h1 {
-        font-size: 32px;
+    .moods {
+        grid-template-columns: repeat(2, 1fr);
     }
 
-    .options {
+    .activities {
         grid-template-columns: 1fr;
     }
 
-    .card {
-        padding: 20px;
+    .checkins {
+        grid-template-columns: 1fr;
     }
 
-    .adventure {
-        padding: 22px;
-    }
-
-    .story {
-        font-size: 17px;
+    h1 {
+        font-size: 30px;
     }
 
 }
@@ -743,204 +351,222 @@ h1 {
 
 <body>
 
-
 <div class="container">
-
 
     <div class="header">
 
-        <div class="logo">
-            🌌✨
-        </div>
+        <div class="logo">🌱</div>
 
-        <h1>
-            5-Minute Escape
-        </h1>
+        <h1>MindMate AI</h1>
 
         <div class="subtitle">
-            Take a tiny break from your busy day.
-            <br>
-            Choose a world. Make a choice. Escape for a few minutes. 🌿
+            Your little AI-powered stress-buster 💙
+        </div>
+
+        <div class="subtitle">
+            Take a 2-minute break. You deserve it.
         </div>
 
     </div>
 
 
-    <!-- SETUP -->
+    <!-- STEP 1 -->
 
-    <div
-        class="card"
-        id="setup"
-    >
+    <div class="card" id="moodCard">
 
         <div class="section-title">
-            🌈 How are you feeling?
+            😊 How are you feeling right now?
         </div>
 
+        <div class="moods">
 
-        <div class="options">
-
-            <button
-                class="option mood"
-                onclick="selectMood(this,'Stressed')"
-            >
-                😫 Stressed
+            <button class="mood-btn" onclick="selectMood('Stressed', this)">
+                😰 Stressed
             </button>
 
-            <button
-                class="option mood"
-                onclick="selectMood(this,'Tired')"
-            >
-                😴 Tired
-            </button>
-
-            <button
-                class="option mood"
-                onclick="selectMood(this,'Sad')"
-            >
+            <button class="mood-btn" onclick="selectMood('Sad', this)">
                 😔 Sad
             </button>
 
-            <button
-                class="option mood"
-                onclick="selectMood(this,'Bored')"
-            >
-                😐 Bored
+            <button class="mood-btn" onclick="selectMood('Tired', this)">
+                😴 Tired
             </button>
 
-            <button
-                class="option mood"
-                onclick="selectMood(this,'Overwhelmed')"
-            >
+            <button class="mood-btn" onclick="selectMood('Angry', this)">
+                😡 Angry
+            </button>
+
+            <button class="mood-btn" onclick="selectMood('Worried', this)">
+                😟 Worried
+            </button>
+
+            <button class="mood-btn" onclick="selectMood('Overwhelmed', this)">
                 😵 Overwhelmed
             </button>
 
-            <button
-                class="option mood"
-                onclick="selectMood(this,'Happy')"
-            >
-                😄 Happy
+            <button class="mood-btn" onclick="selectMood('Okay', this)">
+                🙂 Okay
+            </button>
+
+            <button class="mood-btn" onclick="selectMood('Excited', this)">
+                🤩 Excited
             </button>
 
         </div>
-
-
-        <div class="section-title">
-            🌌 Where would you like to escape?
-        </div>
-
-
-        <div class="options">
-
-            <button
-                class="option world"
-                onclick="selectWorld(this,'Enchanted Forest')"
-            >
-                🌲 Enchanted Forest
-            </button>
-
-            <button
-                class="option world"
-                onclick="selectWorld(this,'Secret Island')"
-            >
-                🏝️ Secret Island
-            </button>
-
-            <button
-                class="option world"
-                onclick="selectWorld(this,'Space Station')"
-            >
-                🚀 Space Station
-            </button>
-
-            <button
-                class="option world"
-                onclick="selectWorld(this,'Magical Kingdom')"
-            >
-                🏰 Magical Kingdom
-            </button>
-
-            <button
-                class="option world"
-                onclick="selectWorld(this,'Dragon Valley')"
-            >
-                🐉 Dragon Valley
-            </button>
-
-            <button
-                class="option world"
-                onclick="selectWorld(this,'Underwater City')"
-            >
-                🌊 Underwater City
-            </button>
-
-        </div>
-
 
         <button
-            class="start-btn"
-            id="startBtn"
-            onclick="startEscape()"
-        >
-            ✨ Start My Escape
+            class="primary-btn"
+            onclick="understandMood()">
+
+            💙 Help Me Feel Better
+
         </button>
-
-
-        <div
-            class="loading"
-            id="loading"
-        >
-            🌌 Opening a magical world...
-        </div>
-
-
-        <div
-            class="error"
-            id="error"
-        ></div>
 
     </div>
 
 
-    <!-- ADVENTURE -->
+    <!-- STEP 2 -->
 
-    <div
-        class="adventure"
-        id="adventure"
-    >
+    <div class="card hidden" id="activityCard">
 
-        <div class="adventure-title">
-            🌌 Your 5-Minute Escape
+        <div class="section-title">
+            🤖 What would you like to do?
         </div>
 
+        <div id="moodMessage" class="output"></div>
 
-        <div
-            class="story"
-            id="story"
-        ></div>
+        <br>
+
+        <div class="activities">
+
+            <button
+                class="activity-btn"
+                onclick="startActivity('Calm Me')">
+
+                🧘<br>
+                <b>Calm Me</b>
+                <br>
+                <small>Relax your mind</small>
+
+            </button>
 
 
-        <div
-            class="choice-area"
-            id="choices"
-        ></div>
+            <button
+                class="activity-btn"
+                onclick="startActivity('Distract Me')">
 
+                🎮<br>
+                <b>Distract Me</b>
+                <br>
+                <small>Give me something fun</small>
+
+            </button>
+
+
+            <button
+                class="activity-btn"
+                onclick="startActivity('Cheer Me Up')">
+
+                📖<br>
+                <b>Cheer Me Up</b>
+                <br>
+                <small>Make me smile</small>
+
+            </button>
+
+        </div>
+
+    </div>
+
+
+    <!-- STEP 3 -->
+
+    <div class="card hidden" id="activityResultCard">
+
+        <div class="section-title" id="activityTitle">
+            ✨ Your activity
+        </div>
+
+        <div id="activityResult" class="output"></div>
 
         <button
-            class="restart"
-            id="restart"
-            onclick="restartEscape()"
-        >
-            🔄 Start Another Escape
+            class="primary-btn"
+            onclick="showCheckin()">
+
+            🌱 I'm Done — Check In
+
+        </button>
+
+    </div>
+
+
+    <!-- STEP 4 -->
+
+    <div class="card hidden" id="checkinCard">
+
+        <div class="section-title">
+
+            💙 How do you feel now?
+
+        </div>
+
+        <div class="checkins">
+
+            <button
+                class="checkin-btn"
+                onclick="checkin('Better')">
+
+                😊 Much Better
+
+            </button>
+
+            <button
+                class="checkin-btn"
+                onclick="checkin('A Little Better')">
+
+                🙂 A Little Better
+
+            </button>
+
+            <button
+                class="checkin-btn"
+                onclick="checkin('Same')">
+
+                😐 Same
+
+            </button>
+
+        </div>
+
+    </div>
+
+
+    <!-- STEP 5 -->
+
+    <div class="card hidden" id="finalCard">
+
+        <div class="section-title">
+            🌈 Your MindMate Moment
+        </div>
+
+        <div id="finalResult" class="output"></div>
+
+        <button
+            class="primary-btn"
+            onclick="restart()">
+
+            🔄 Start Another Break
+
         </button>
 
     </div>
 
 
     <div class="footer">
-        🌿 5-Minute Escape AI • A tiny break for a busy mind ✨
-    </div>
 
+        🌱 MindMate AI • A small break can make a big difference.
+
+    </div>
 
 </div>
 
@@ -948,425 +574,262 @@ h1 {
 <script>
 
 let selectedMood = "";
-
-let selectedWorld = "";
-
-let currentStory = "";
-
-let currentTurn = 1;
+let selectedActivity = "";
+let lastActivity = "";
 
 
-function selectMood(button, mood) {
-
-    document
-        .querySelectorAll(".mood")
-        .forEach(btn => {
-            btn.classList.remove("selected");
-        });
-
-    button.classList.add("selected");
+function selectMood(mood, button) {
 
     selectedMood = mood;
-}
-
-
-function selectWorld(button, world) {
 
     document
-        .querySelectorAll(".world")
-        .forEach(btn => {
-            btn.classList.remove("selected");
-        });
+        .querySelectorAll(".mood-btn")
+        .forEach(btn => btn.classList.remove("selected"));
 
     button.classList.add("selected");
-
-    selectedWorld = world;
 }
 
 
-async function startEscape() {
-
-    const error =
-        document.getElementById("error");
-
-    const loading =
-        document.getElementById("loading");
-
-    const button =
-        document.getElementById("startBtn");
-
-
-    error.style.display = "none";
-
+async function understandMood() {
 
     if (!selectedMood) {
 
-        error.style.display = "block";
-
-        error.textContent =
-            "🌈 Please choose how you are feeling.";
+        alert("Please choose how you are feeling first 💙");
 
         return;
     }
 
+    document.getElementById("activityCard")
+        .classList.remove("hidden");
 
-    if (!selectedWorld) {
-
-        error.style.display = "block";
-
-        error.textContent =
-            "🌌 Please choose an escape world.";
-
-        return;
-    }
-
-
-    button.disabled = true;
-
-    loading.style.display = "block";
-
+    document.getElementById("moodMessage")
+        .innerText = "🤖 MindMate is thinking...";
 
     try {
 
-        const response =
-            await fetch("/start", {
+        const response = await fetch("/api/start", {
 
-                method: "POST",
+            method: "POST",
 
-                headers: {
-                    "Content-Type": "application/json"
-                },
+            headers: {
+                "Content-Type": "application/json"
+            },
 
-                body: JSON.stringify({
+            body: JSON.stringify({
+                mood: selectedMood
+            })
 
-                    mood: selectedMood,
+        });
 
-                    world: selectedWorld
+        const data = await response.json();
 
-                })
+        if (!response.ok) {
 
-            });
-
-
-        const data =
-            await response.json();
-
-
-        if (!data.success) {
-
-            throw new Error(
-                data.error ||
-                "Could not start the escape."
-            );
+            throw new Error(data.detail || "Something went wrong");
 
         }
 
+        document.getElementById("moodMessage")
+            .innerText =
+                data.message;
 
-        currentStory =
-            data.story;
+    } catch(error) {
 
-        currentTurn =
-            data.turn;
-
-
-        showAdventure(
-            currentStory
-        );
+        document.getElementById("moodMessage")
+            .innerText =
+                "💙 Let's take a small break together.";
 
     }
-
-    catch (err) {
-
-        error.style.display = "block";
-
-        error.textContent =
-            "❌ " + err.message;
-
-    }
-
-    finally {
-
-        button.disabled = false;
-
-        loading.style.display = "none";
-
-    }
-
-}
-
-
-function showAdventure(text) {
-
-    document.getElementById(
-        "setup"
-    ).style.display = "none";
-
-
-    document.getElementById(
-        "adventure"
-    ).style.display = "block";
-
-
-    document.getElementById(
-        "story"
-    ).textContent = text;
-
-
-    createChoices(text);
-
 
     document
-        .getElementById("adventure")
+        .getElementById("activityCard")
         .scrollIntoView({
             behavior: "smooth"
         });
-
 }
 
 
-function createChoices(text) {
+async function startActivity(activity) {
 
-    const choiceArea =
-        document.getElementById("choices");
+    selectedActivity = activity;
 
+    document
+        .getElementById("activityResultCard")
+        .classList.remove("hidden");
 
-    choiceArea.innerHTML = "";
+    document
+        .getElementById("activityResult")
+        .innerText = "✨ Creating your activity...";
 
-
-    const hasA =
-        /🅰️/u.test(text);
-
-    const hasB =
-        /🅱️/u.test(text);
-
-    const hasC =
-        /🅲️/u.test(text);
-
-
-    if (!hasA || !hasB || !hasC) {
-
-        document.getElementById(
-            "restart"
-        ).style.display = "block";
-
-        return;
-
-    }
-
-
-    const choices = extractChoices(text);
-
-
-    choices.forEach(choice => {
-
-        const button =
-            document.createElement("button");
-
-        button.className = "choice";
-
-        button.textContent =
-            choice.label + " " + choice.text;
-
-        button.onclick =
-            () => chooseOption(
-                choice.text
-            );
-
-        choiceArea.appendChild(button);
-
-    });
-
-}
-
-
-function extractChoices(text) {
-
-    const choices = [];
-
-
-    const patterns = [
-
-        /🅰️\s*(.+)/u,
-
-        /🅱️\s*(.+)/u,
-
-        /🅲️\s*(.+)/u
-
-    ];
-
-
-    const labels = [
-        "🅰️",
-        "🅱️",
-        "🅲️"
-    ];
-
-
-    patterns.forEach(
-        (pattern, index) => {
-
-            const match =
-                text.match(pattern);
-
-            if (match) {
-
-                choices.push({
-
-                    label: labels[index],
-
-                    text:
-                        match[1]
-                            .trim()
-                            .split("\n")[0]
-
-                });
-
-            }
-
-        }
-    );
-
-
-    return choices;
-
-}
-
-
-async function chooseOption(choice) {
-
-    const choiceArea =
-        document.getElementById("choices");
-
-
-    choiceArea.innerHTML =
-        '<div class="loading" style="display:block;">✨ Your choice is opening a new path...</div>';
-
+    document
+        .getElementById("activityTitle")
+        .innerText =
+            activity + " ✨";
 
     try {
 
-        const response =
-            await fetch("/continue", {
+        const response = await fetch("/api/activity", {
 
-                method: "POST",
+            method: "POST",
 
-                headers: {
-                    "Content-Type": "application/json"
-                },
+            headers: {
+                "Content-Type": "application/json"
+            },
 
-                body: JSON.stringify({
+            body: JSON.stringify({
 
-                    mood: selectedMood,
+                mood: selectedMood,
+                activity: activity
 
-                    world: selectedWorld,
+            })
 
-                    story: currentStory,
+        });
 
-                    choice: choice,
+        const data = await response.json();
 
-                    turn: currentTurn
-
-                })
-
-            });
-
-
-        const data =
-            await response.json();
-
-
-        if (!data.success) {
+        if (!response.ok) {
 
             throw new Error(
-                data.error ||
-                "Could not continue the adventure."
+                data.detail ||
+                "Unable to create activity"
             );
 
         }
 
-
-        currentStory +=
-            "\n\n" + data.story;
-
-        currentTurn =
-            data.turn;
-
-
-        document.getElementById(
-            "story"
-        ).textContent =
-            currentStory;
-
-
-        createChoices(
-            data.story
-        );
-
+        lastActivity = data.activity;
 
         document
-            .getElementById("story")
-            .scrollIntoView({
-                behavior: "smooth"
-            });
+            .getElementById("activityResult")
+            .innerText =
+                data.activity;
+
+    } catch(error) {
+
+        document
+            .getElementById("activityResult")
+            .innerText =
+                "💙 Something went wrong. Please try again.";
 
     }
 
-    catch (err) {
-
-        choiceArea.innerHTML =
-            '<div class="error" style="display:block;">❌ '
-            + err.message +
-            '</div>';
-
-    }
-
+    document
+        .getElementById("activityResultCard")
+        .scrollIntoView({
+            behavior: "smooth"
+        });
 }
 
 
-function restartEscape() {
+function showCheckin() {
+
+    document
+        .getElementById("checkinCard")
+        .classList.remove("hidden");
+
+    document
+        .getElementById("checkinCard")
+        .scrollIntoView({
+            behavior: "smooth"
+        });
+}
+
+
+async function checkin(feeling) {
+
+    document
+        .getElementById("finalCard")
+        .classList.remove("hidden");
+
+    document
+        .getElementById("finalResult")
+        .innerText =
+            "💙 MindMate is preparing your next step...";
+
+    try {
+
+        const response = await fetch("/api/checkin", {
+
+            method: "POST",
+
+            headers: {
+                "Content-Type": "application/json"
+            },
+
+            body: JSON.stringify({
+
+                mood: selectedMood,
+                activity: selectedActivity,
+                feeling: feeling
+
+            })
+
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+
+            throw new Error(
+                data.detail ||
+                "Something went wrong"
+            );
+
+        }
+
+        document
+            .getElementById("finalResult")
+            .innerText =
+                data.message;
+
+    } catch(error) {
+
+        document
+            .getElementById("finalResult")
+            .innerText =
+                "🌱 You did something good for yourself today. Keep going! 💙";
+
+    }
+
+    document
+        .getElementById("finalCard")
+        .scrollIntoView({
+            behavior: "smooth"
+        });
+}
+
+
+function restart() {
 
     selectedMood = "";
+    selectedActivity = "";
+    lastActivity = "";
 
-    selectedWorld = "";
-
-    currentStory = "";
-
-    currentTurn = 1;
-
-
-    document.getElementById(
-        "adventure"
-    ).style.display = "none";
-
-
-    document.getElementById(
-        "setup"
-    ).style.display = "block";
-
-
-    document.querySelectorAll(
-        ".option"
-    ).forEach(btn => {
-
-        btn.classList.remove(
-            "selected"
+    document
+        .querySelectorAll(".mood-btn")
+        .forEach(btn =>
+            btn.classList.remove("selected")
         );
 
-    });
+    document
+        .getElementById("activityCard")
+        .classList.add("hidden");
 
+    document
+        .getElementById("activityResultCard")
+        .classList.add("hidden");
 
-    document.getElementById(
-        "restart"
-    ).style.display = "none";
+    document
+        .getElementById("checkinCard")
+        .classList.add("hidden");
 
+    document
+        .getElementById("finalCard")
+        .classList.add("hidden");
 
     window.scrollTo({
-
         top: 0,
-
         behavior: "smooth"
-
     });
-
 }
 
 </script>
@@ -1374,4 +837,200 @@ function restartEscape() {
 </body>
 
 </html>
+""")
+
+
+# ============================================================
+# STEP 1 → UNDERSTAND MOOD
+# ============================================================
+
+@app.post("/api/start")
+def start(request: StartRequest):
+
+    mood = request.mood.strip()
+
+    if contains_risk_language(mood):
+        return safety_response()
+
+    prompt = f"""
+You are MindMate AI, a friendly student stress-buster.
+
+A student says they feel: {mood}
+
+Respond in a warm and friendly way.
+
+Rules:
+- Use simple English.
+- Use emojis.
+- Do not diagnose the student.
+- Do not give medical advice.
+- Keep the response under 70 words.
+- Acknowledge their feeling.
+- Tell them they don't need to solve everything immediately.
+- Encourage a short break.
+- Do not ask many questions.
+
+Return only the response.
 """
+
+    message = ask_gemini(prompt)
+
+    return {
+        "mood": mood,
+        "message": message
+    }
+
+
+# ============================================================
+# STEP 2 → CREATE ACTIVITY
+# ============================================================
+
+@app.post("/api/activity")
+def create_activity(request: ActivityRequest):
+
+    mood = request.mood.strip()
+    activity = request.activity.strip()
+
+    if contains_risk_language(mood):
+        return safety_response()
+
+    prompts = {
+
+        "Calm Me": """
+Create a very short calming activity for a college student.
+
+Include:
+🌬️ breathing or grounding
+⏱️ approximately 1–2 minutes
+🌱 simple instructions
+💙 one encouraging sentence
+
+Do not make it complicated.
+""",
+
+        "Distract Me": """
+Create a tiny fun activity for a college student.
+
+Choose ONE:
+- funny challenge
+- simple puzzle
+- imagination game
+- silly question
+- mini guessing game
+
+Make it playful.
+Use emojis.
+Keep it under 150 words.
+Do not make it academic.
+""",
+
+        "Cheer Me Up": """
+Create a short cheerful mini-story for a college student.
+
+The story should:
+- be funny, magical or heartwarming
+- use simple English
+- have a happy ending
+- use emojis
+- be around 150 words
+- make the student smile
+
+Do not make it about studying.
+"""
+    }
+
+    selected_prompt = prompts.get(
+        activity,
+        prompts["Distract Me"]
+    )
+
+    prompt = f"""
+You are MindMate AI.
+
+Student mood:
+{mood}
+
+Chosen activity:
+{activity}
+
+{selected_prompt}
+
+The purpose is to provide a small positive break,
+not to solve the student's life problems.
+
+Return only the activity.
+"""
+
+    result = ask_gemini(prompt)
+
+    return {
+        "activity": result
+    }
+
+
+# ============================================================
+# STEP 3 → CHECK-IN
+# ============================================================
+
+@app.post("/api/checkin")
+def checkin(request: CheckinRequest):
+
+    mood = request.mood.strip()
+    activity = request.activity.strip()
+    feeling = request.feeling.strip()
+
+    prompt = f"""
+You are MindMate AI, a supportive student stress-buster.
+
+Initial mood:
+{mood}
+
+Activity:
+{activity}
+
+Student says they now feel:
+{feeling}
+
+Create the next response.
+
+If the student feels "Better" or "A Little Better":
+- celebrate gently
+- give a positive message
+- remind them that small breaks matter
+- end warmly
+
+If the student feels "Same":
+- do NOT say they failed
+- acknowledge that one activity may not be enough
+- suggest another tiny activity
+- give 2 or 3 choices
+
+Use simple English.
+Use emojis.
+Keep it under 120 words.
+
+Do not diagnose.
+Do not give medical advice.
+
+Return only the response.
+"""
+
+    result = ask_gemini(prompt)
+
+    return {
+        "message": result
+    }
+
+
+# ============================================================
+# HEALTH CHECK
+# ============================================================
+
+@app.get("/health")
+def health():
+
+    return {
+        "status": "healthy",
+        "application": "MindMate AI",
+        "model": MODEL
+    }
