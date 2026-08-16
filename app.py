@@ -24,10 +24,8 @@ app = FastAPI(
 # CONFIGURATION
 # ============================================================
 
-TMDB_TOKEN = os.getenv("TMDB_ACCESS_TOKEN")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-
-TMDB_URL = "https://api.themoviedb.org/3"
+WATCHMODE_API_KEY = os.getenv("WATCHMODE_API_KEY")
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
 
 # ============================================================
@@ -276,16 +274,10 @@ def get_joke():
 
 
 # ============================================================
-# TMDB MOVIES
+# WATCHMODE MOVIES
 # ============================================================
 
 def get_movies():
-    """
-    Get movie recommendations from Watchmode.
-
-    Uses WATCHMODE_API_KEY from Render Environment Variables.
-    Avoids showing movies that were already displayed in this session.
-    """
 
     if not WATCHMODE_API_KEY:
         return {
@@ -298,27 +290,21 @@ def get_movies():
         }
 
     try:
-        headers = {
-            "accept": "application/json"
-        }
 
-        # Watchmode API
         response = requests.get(
             "https://api.watchmode.com/v1/list-titles/",
             params={
                 "apiKey": WATCHMODE_API_KEY,
                 "types": "movie",
-                "source_ids": "netflix",
+                "source_ids": "203",     # Netflix
                 "regions": "IN",
-                "limit": 20,
-                "sort_by": "popularity_desc"
+                "sort_by": "popularity_desc",
+                "limit": 20
             },
-            headers=headers,
             timeout=10
         )
 
         response.raise_for_status()
-
         data = response.json()
 
         movies = []
@@ -330,7 +316,6 @@ def get_movies():
             if not movie_id:
                 continue
 
-            # Don't repeat movies in the same session
             if movie_id in session_history["movies"]:
                 continue
 
@@ -338,27 +323,14 @@ def get_movies():
 
             movies.append({
                 "id": movie_id,
-                "title": movie.get(
-                    "title",
-                    "Unknown Movie"
+                "title": movie.get("title", "Unknown Movie"),
+                "overview": movie.get(
+                    "plot_overview",
+                    "A movie worth checking out! 🍿"
                 ),
-                "overview": (
-                    movie.get("plot_overview")
-                    or "A movie worth checking out! 🍿"
-                ),
-                "rating": movie.get(
-                    "user_rating",
-                    "N/A"
-                ),
-                "release_date": movie.get(
-                    "release_date",
-                    ""
-                ),
-                "poster": movie.get(
-                    "poster",
-                    ""
-                ),
-                "type": "movie"
+                "rating": movie.get("user_rating", "N/A"),
+                "release_date": movie.get("release_date", ""),
+                "poster": movie.get("poster", "")
             })
 
             if len(movies) >= 4:
@@ -366,45 +338,30 @@ def get_movies():
 
         return {
             "title": "🎬 Movie Break",
-            "content": (
-                "Here are some movies for your little escape! 🍿✨"
-            ),
+            "content": "Here are some trending Netflix movies for your break! 🍿✨",
             "movies": movies
         }
 
     except requests.exceptions.Timeout:
-
         return {
             "title": "🎬 Movie Break",
-            "content": (
-                "The movie service took too long to respond. "
-                "Let's try again! 🍿"
-            ),
+            "content": "The movie service took too long to respond. Try again! ⏳",
             "movies": []
         }
 
     except requests.exceptions.RequestException:
-
         return {
             "title": "🎬 Movie Break",
-            "content": (
-                "I couldn't connect to the movie service right now. "
-                "Try another movie in a moment! 🎬"
-            ),
+            "content": "Couldn't connect to Watchmode right now. 🎬",
             "movies": []
         }
 
-    except Exception:
-
+    except Exception as e:
         return {
             "title": "🎬 Movie Break",
-            "content": (
-                "Something went wrong while finding movies. "
-                "Let's try again! 🍿"
-            ),
+            "content": f"Error: {str(e)}",
             "movies": []
         }
-
 # ============================================================
 # FUN FACT
 # ============================================================
@@ -514,11 +471,10 @@ def home():
 
 @app.get("/api/health")
 def health():
-
     return {
         "status": "healthy",
-        "tmdb_configured": bool(TMDB_TOKEN),
-        "gemini_configured": bool(GEMINI_API_KEY)
+        "watchmode_configured": bool(WATCHMODE_API_KEY),
+        "google_configured": bool(GOOGLE_API_KEY)
     }
 
 
