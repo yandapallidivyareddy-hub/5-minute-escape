@@ -396,45 +396,33 @@ def get_activity():
 
 
 # ============================================================
-# GEMINI
+# GEMINI (MindMate)
 # ============================================================
 
 def ask_gemini(mood: str):
 
-    if not GEMINI_API_KEY:
-
+    if not GOOGLE_API_KEY:
         return {
             "title": "💙 MindMate",
-            "content": (
-                "I'm here with you. Take one slow breath, "
-                "relax your shoulders, and give yourself a tiny break. 🌱"
-            )
+            "content": "Please configure GOOGLE_API_KEY in Render."
         }
 
     try:
-
         from google import genai
 
-        client = genai.Client(
-            api_key=GEMINI_API_KEY
-        )
+        client = genai.Client(api_key=GOOGLE_API_KEY)
 
         prompt = f"""
-You are MindMate, a friendly student stress-buster.
+You are MindMate, a friendly AI companion for students.
 
-The student says they feel: {mood}
+The student's mood is: {mood}
 
-Give a short, warm and encouraging response.
-
-Rules:
-- Use very simple English.
-- Maximum 80 words.
-- Do not repeat generic phrases.
-- Do not diagnose mental health conditions.
-- Do not sound like a therapist.
-- Give ONE tiny practical thing the student can do right now.
-- Use 2-4 suitable emojis.
-- Make the response feel natural and friendly.
+Respond in under 80 words.
+- Be warm and positive
+- Use simple English
+- Give one small practical suggestion
+- Use 2–4 emojis
+- Do not sound like a therapist
 """
 
         response = client.models.generate_content(
@@ -444,20 +432,14 @@ Rules:
 
         return {
             "title": "💙 MindMate Says",
-            "content": response.text
+            "content": response.text.strip()
         }
 
-    except Exception:
-
+    except Exception as e:
         return {
             "title": "💙 MindMate",
-            "content": (
-                "Whatever you're dealing with right now, "
-                "you don't have to solve everything at once. "
-                "Take one tiny step and give yourself some space. 🌱💙"
-            )
+            "content": f"Gemini error: {str(e)}"
         }
-
 
 # ============================================================
 # API
